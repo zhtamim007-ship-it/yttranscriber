@@ -20,6 +20,38 @@ class Settings:
     chunk_seconds: int = int(os.getenv("TRANSCRIPTION_CHUNK_SECONDS", "600"))
     denoise: bool = _as_bool("ENABLE_DENOISE", True)
     cookies_file: str | None = os.getenv("YTDLP_COOKIES_FILE")
+    runtime_cookies_file: Path = Path(os.getenv("YTDLP_RUNTIME_COOKIES_FILE", "/tmp/sonicscript-cookies.txt"))
+    user_cookies_dir: Path = Path(os.getenv("USER_COOKIES_DIR", "/tmp/sonicscript-user-cookies"))
+    require_user_cookie: bool = _as_bool("REQUIRE_USER_COOKIE", True)
+    cookie_ttl_seconds: int = int(os.getenv("USER_COOKIE_TTL_SECONDS", "2592000"))
+
+    def resolve_cookies_file(self, user_id: str | None = None) -> str | None:
+        """Resolve cookie file with priority: user -> shared pool -> env -> legacy runtime."""
+        if user_id:
+            # lazily import to avoid circular
+            from .user_cookies import get_user_cookie_path, find_shared_cookie
+            p = get_user_cookie_path(user_id)
+            if p:
+                return str(p)
+            shared = find_shared_cookie(exclude_user_id=user_id)
+            if shared:
+                _, sp = shared
+                return str(sp)
+        # fallback: explicit env file or legacy runtime single file
+        if self.cookies_file:
+            p = Path(self.cookies_file)
+            if p.exists() and p.is_file() and p.stat().st_size > 0:
+                return self.cookies_file
+        if self.runtime_cookies_file.exists() and self.runtime_cookies_file.is_file() and self.runtime_cookies_file.stat().st_size > 0:
+            return str(self.runtime_cookies_file)
+        # last resort: any shared pool even without user_id
+        if not user_id:
+            from .user_cookies import find_shared_cookie
+            shared = find_shared_cookie()
+            if shared:
+                _, sp = shared
+                return str(sp)
+        return self.cookies_file
 
     transcription_base_url: str = os.getenv("TRANSCRIPTION_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
     transcription_model: str = os.getenv("TRANSCRIPTION_MODEL", "whisper-large-v3")

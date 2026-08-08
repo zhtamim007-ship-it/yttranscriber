@@ -86,6 +86,50 @@ body.app-mode .site-header, body.app-mode footer { display: none; }
 .trust-row svg { width: 19px; height: 19px; color: var(--mint); }
 .trust-row b { color: #c5d1d7; font-weight: 600; }
 
+.cookie-help { margin-top: 22px; max-width: 920px; padding: 18px 18px 14px; background: #fff8f0; border: 1px solid #f0cdb0; border-radius: 16px; box-shadow: 0 12px 40px rgba(20,42,54,.06); }
+.cookie-help-head { display: flex; gap: 12px; align-items: flex-start; }
+.cookie-help-head svg { flex: 0 0 auto; width: 26px; height: 26px; margin-top: 2px; color: #d46a1a; }
+.cookie-help-head div { flex: 1; }
+.cookie-help-head strong { display: block; font: 700 14px Manrope, sans-serif; }
+.cookie-help-head p { margin: 4px 0 0; color: #6b7a80; font-size: 12px; line-height: 1.5; }
+.cookie-steps { margin: 14px 0 12px 18px; color: #3b4a52; font-size: 12px; line-height: 1.6; }
+.cookie-steps a { color: #0c9c72; text-decoration: underline; }
+.cookie-steps code { background: #fff; border: 1px solid #e8ddd3; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+.cookie-upload { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.cookie-file-name { color: #6b7a80; font-size: 11px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cookie-status { min-height: 16px; margin: 10px 0 0; font-size: 11px; }
+.cookie-status.ok { color: #0c9c72; }
+.cookie-status.err { color: #d64242; }
+.cookie-details { margin-top: 12px; font-size: 11px; color: #5a6a71; }
+.cookie-details summary { cursor: pointer; color: #0c9c72; font-weight: 600; }
+.cookie-details p { margin: 8px 0 0; line-height: 1.6; }
+.cookie-details code { background: #fff; border: 1px solid #e8ddd3; padding: 1px 4px; border-radius: 3px; }
+
+/* New per-user gate */
+.user-gate { margin-top: 38px; max-width: 920px; padding: 22px 22px 16px; background: white; border: 1px solid #dfe5e3; border-radius: 18px; box-shadow: 0 16px 50px rgba(7,22,35,.12); border-left: 4px solid #ff9e3d; }
+.user-gate-head { display: flex; gap: 14px; align-items: flex-start; }
+.gate-icon { flex: 0 0 auto; width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; background: #fff4e6; color: #d46a1a; }
+.gate-icon svg { width: 22px; }
+.user-gate-head div { flex: 1; }
+.user-gate-head strong { display: block; font: 700 15px Manrope, sans-serif; }
+.user-gate-head p { margin: 6px 0 0; color: #5a6a71; font-size: 12px; line-height: 1.6; }
+.gate-userid { margin-top: 6px !important; font: 600 10px monospace; color: #0c9c72 !important; background: #e4fbf3; display: inline-block; padding: 2px 7px; border-radius: 6px; }
+.gate-status { margin: 14px 0 10px; padding: 10px 12px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+.gate-status.ok { background: #e4fbf3; color: #0c7a5a; border: 1px solid #b8e8d8; }
+.gate-status.warn { background: #fff4e6; color: #8a4d00; border: 1px solid #f0cdb0; }
+.gate-status.err { background: #fff0f0; color: #b91c1c; border: 1px solid #fecaca; }
+.gate-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 14px 0; padding: 4px; border-radius: 12px; background: #f0f3f2; }
+.gate-tab { padding: 10px; border: 0; border-radius: 9px; background: transparent; color: #718087; font-size: 12px; font-weight: 700; cursor: pointer; }
+.gate-tab.active { background: white; color: var(--ink); border: 1px solid #dfe5e3; box-shadow: 0 3px 9px rgba(12,30,42,.06); }
+.gate-panel { padding: 6px 0; }
+.community-desc { color: #3b4a52; font-size: 12px; line-height: 1.6; }
+.pool-info { margin: 12px 0; padding: 12px; border-radius: 10px; background: #f7f8f4; border: 1px solid #e8eee8; font-size: 12px; line-height: 1.6; }
+.pool-info.has-pool { background: #e4fbf3; border-color: #b8e8d8; }
+.share-toggle { display: flex; gap: 9px; align-items: flex-start; margin-top: 14px; padding: 12px; border-radius: 10px; background: #f7f8f4; border: 1px solid #e8eee8; font-size: 12px; cursor: pointer; }
+.share-toggle input { margin-top: 2px; }
+.share-toggle small { color: #667481; }
+.share-note { color: #6b7a80; font-size: 11px; margin: 6px 0 0 28px; }
+
 .setup-section { padding: 80px 0 95px; scroll-margin-top: 20px; }
 .section-kicker { margin-bottom: 18px; }
 .setup-grid { display: grid; grid-template-columns: minmax(0, .92fr) minmax(440px, 1.08fr); gap: 24px; align-items: stretch; }

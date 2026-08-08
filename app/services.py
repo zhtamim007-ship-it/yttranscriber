@@ -29,6 +29,8 @@ class Job:
     start_seconds: float
     end_seconds: float
     directory: Path
+    owner_user_id: str | None = None
+    cookie_source: str | None = None  # 'own' | 'shared' | 'global' | None
     status: str = "queued"
     stage: str = "Waiting for a transcription slot"
     progress: float = 2
@@ -99,9 +101,31 @@ class Job:
         }
 
 
-def inspect_video(url: str) -> dict[str, Any]:
-    url = validate_youtube_url(url)
-    options: dict[str, Any] = {
+def _cookies_file(user_id: str | None = None) -> tuple[str | None, str | None]:
+    """Return (path, source) for given user_id."""
+    resolved = settings.resolve_cookies_file(user_id=user_id)
+    if not resolved:
+        return None, None
+    # Determine source by checking user store
+    if user_id:
+        try:
+            from .user_cookies import get_user_cookie_path, find_shared_cookie
+            own = get_user_cookie_path(user_id)
+            if own and str(own) == resolved:
+                return resolved, "own"
+            shared = find_shared_cookie(exclude_user_id=user_id)
+            if shared and str(shared[1]) == resolved:
+                return resolved, "shared"
+        except Exception:
+            pass
+    # fallback global
+    if resolved == settings.cookies_file or resolved == str(settings.runtime_cookies_file):
+        return resolved, "global"
+    return resolved, "shared"
+
+
+def _base_ydl_options(user_id: str | None = None) -> dict[str, Any]:
+    opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
@@ -110,15 +134,96 @@ def inspect_video(url: str) -> dict[str, Any]:
         "socket_timeout": 25,
         "retries": 2,
         "js_runtimes": {"node": {}},
+        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
     }
-    if settings.cookies_file:
-        options["cookiefile"] = settings.cookies_file
+    cookies, _ = _cookies_file(user_id)
+    if cookies:
+        opts["cookiefile"] = cookies
+    return opts
+
+
+def _handle_inspect_error(exc: DownloadError) -> ServiceError:
+    message = str(exc).replace("ERROR: ", "").strip()
+    lowered = message.lower()
+    if any(
+        phrase in lowered
+        for phrase in (
+            "sign in to confirm",
+            "confirm you're not a bot",
+            "bot",
+            "cookies",
+            "use --cookies",
+            "from-browser",
+        )
+    ):
+        return ServiceError(
+            "YouTube blocked this request from the server (bot check). "
+            "YouTube often blocks cloud servers like Render. No code fix can permanently avoid it. "
+            "Quick fix: click 'Fix with cookies' below, install the free 'Get cookies.txt LOCALLY' extension, export cookies.txt, upload it, and try again. "
+            "See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
+        )
+    return ServiceError(f"YouTube could not open this video. {message[-400:]}")
+
+
+def inspect_video(url: str, user_id: str | None = None) -> dict[str, Any]:
+    url = validate_youtube_url(url)
+    # Enforce per-user cookie if required
+    if settings.require_user_cookie and user_id:
+        from .user_cookies import is_user_cookie_valid, find_shared_cookie
+        own_valid = is_user_cookie_valid(user_id)
+        has_shared = find_shared_cookie(exclude_user_id=user_id) is not None
+        has_global = bool(settings.resolve_cookies_file(user_id=None))
+        if not own_valid and not has_shared and not has_global:
+            raise ServiceError(
+                "You need to upload your YouTube cookie first. Click 'Upload My Cookie' below. "
+                "You can also choose 'Use Community Cookie' if someone shared theirs."
+            )
+        if not own_valid and not has_shared and has_global:
+            # allow global fallback silently
+            pass
+    options = _base_ydl_options(user_id=user_id)
+    info: dict[str, Any] | None = None
+    # Track which cookie we tried for expiry marking
+    cookies_tried, source = _cookies_file(user_id)
     try:
         with yt_dlp.YoutubeDL(options) as downloader:
             info = downloader.extract_info(url, download=False)
+        # success: mark cookie used
+        if cookies_tried and source in {"own", "shared"} and user_id:
+            try:
+                from .user_cookies import mark_used
+                # if shared, mark donor as used
+                if source == "shared":
+                    from .user_cookies import find_shared_cookie
+                    shared = find_shared_cookie(exclude_user_id=user_id)
+                    if shared:
+                        mark_used(shared[0])
+                else:
+                    mark_used(user_id)
+            except Exception:
+                pass
     except DownloadError as exc:
-        message = str(exc).replace("ERROR: ", "").strip()
-        raise ServiceError(f"YouTube could not open this video. {message[-300:]}") from exc
+        msg = str(exc).lower()
+        # If we got a bot error and we used a user cookie, mark it expired so UI prompts renew
+        if ("sign in" in msg or "bot" in msg) and cookies_tried and source == "own" and user_id:
+            try:
+                from .user_cookies import mark_expired
+                mark_expired(user_id)
+            except Exception:
+                pass
+        if "sign in" in msg or "bot" in msg:
+            try:
+                alt_opts = dict(options)
+                alt_opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+                with yt_dlp.YoutubeDL(alt_opts) as downloader:
+                    info = downloader.extract_info(url, download=False)
+            except DownloadError as exc2:
+                raise _handle_inspect_error(exc2) from exc2
+            except Exception as exc2:
+                raise _handle_inspect_error(exc) from exc2
+            # if retry succeeded, fall through to processing
+        else:
+            raise _handle_inspect_error(exc) from exc
     except Exception as exc:
         raise ServiceError("YouTube metadata could not be loaded. Check the link and try again.") from exc
 
@@ -226,17 +331,18 @@ class JobManager:
             "--no-playlist", "--no-warnings", "--newline",
             "--js-runtimes", "node",
             "--retries", "3", "--fragment-retries", "3",
+            "--extractor-args", "youtube:player_client=android,web",
             "-f", "bestaudio/best",
             "-o", output,
         ]
         is_full = job.start_seconds <= 0.05 and abs(job.end_seconds - float(job.video["duration"])) <= 0.75
         if not is_full:
-            # Fractional timestamps keep sub-second selections precise. yt-dlp passes
-            # this range to FFmpeg instead of downloading the entire video first.
             section = f"*{clock(job.start_seconds, milliseconds=True)}-{clock(job.end_seconds, milliseconds=True)}"
             command.extend(["--download-sections", section])
-        if settings.cookies_file:
-            command.extend(["--cookies", settings.cookies_file])
+        cookies, source = _cookies_file(job.owner_user_id)
+        if cookies:
+            command.extend(["--cookies", cookies])
+            job.cookie_source = source
         command.append(job.url)
 
         job.process = await asyncio.create_subprocess_exec(
@@ -264,8 +370,13 @@ class JobManager:
         return_code = await job.process.wait()
         if return_code != 0:
             detail = " ".join(recent_output)[-500:]
-            if "Sign in" in detail or "bot" in detail.lower():
-                raise ServiceError("YouTube requested verification from this server. Configure YTDLP_COOKIES_FILE or try again later.")
+            lowered_detail = detail.lower()
+            if "sign in" in lowered_detail or "bot" in lowered_detail or "cookies" in lowered_detail:
+                raise ServiceError(
+                    "YouTube requested verification from this server (bot check). "
+                    "Upload a fresh cookies.txt via 'Fix with cookies' or set YTDLP_COOKIES_FILE. "
+                    "See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
+                )
             raise ServiceError(f"The video audio could not be downloaded. {detail}")
 
         candidates = [
@@ -276,8 +387,6 @@ class JobManager:
             raise ServiceError("The audio download finished without a usable file.")
         source = max(candidates, key=lambda path: path.stat().st_size)
         selected = job.directory / "selected-audio.mp3"
-        # --download-sections starts the downloaded media at the selection. A final
-        # encode gives browsers a consistent, seekable file and enforces the exact end.
         await self._run_command([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-i", str(source), "-t", str(job.selected_duration),
@@ -367,8 +476,6 @@ class JobManager:
                         continue
                     start = chunk_offset + float(api_segment.get("start") or 0)
                     end = chunk_offset + float(api_segment.get("end") or start + 0.1)
-                    # The two-second overlap protects words at a chunk boundary. Keep
-                    # each overlapping segment on only one side of that boundary.
                     if index and (start + end) / 2 < desired_start:
                         continue
                     all_segments.append({

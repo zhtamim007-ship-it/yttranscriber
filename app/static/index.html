@@ -52,6 +52,76 @@
           </div>
         </form>
 
+        <!-- Per-user cookie gate: every user must have a cookie, with community sharing -->
+        <div id="userCookieGate" class="user-gate" hidden>
+          <div class="user-gate-head">
+            <div class="gate-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.3 3 10.6c-.3.3-.4.8-.3 1.2l1.4 6.2c.2.8.9 1.4 1.7 1.4h10.4c.8 0 1.5-.6 1.7-1.4l1.4-6.2c.1-.4 0-.9-.3-1.2L13.7 3.3c-.4-.4-1-.4-1.4 0l-2 2Z"/></svg></div>
+            <div>
+              <strong id="gateTitle">YouTube needs your cookie — one-time setup</strong>
+              <p id="gateSubtitle">Every user uploads their own <code>cookies.txt</code> once. We save it securely for you and ask again only when it expires (2–4 weeks). No cookie = no transcription.</p>
+              <p id="gateUserId" class="gate-userid"></p>
+            </div>
+            <button id="closeGate" class="clear-button" type="button" aria-label="Close">×</button>
+          </div>
+
+          <div class="gate-status" id="gateStatus"></div>
+
+          <div class="gate-tabs" role="tablist">
+            <button class="gate-tab active" data-tab="own" type="button">① Upload My Cookie</button>
+            <button class="gate-tab" data-tab="community" type="button">② Use Community Cookie</button>
+          </div>
+
+          <div class="gate-panel" data-panel="own">
+            <ol class="cookie-steps">
+              <li><b>Install</b> <a href="https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noopener">Get cookies.txt LOCALLY</a> (Chrome) or <b>cookies.txt</b> (Firefox)</li>
+              <li>Open <b>youtube.com</b> while logged in → click extension → <b>Export</b> → <b>youtube.com</b> → saves <code>cookies.txt</code></li>
+              <li>Upload below — we encrypt-store it for you:</li>
+            </ol>
+            <form id="myCookieForm" class="cookie-upload">
+              <input id="myCookieFile" type="file" accept=".txt" hidden>
+              <button id="myCookieBrowse" class="button button-secondary" type="button">Choose cookies.txt</button>
+              <span id="myCookieFileName" class="cookie-file-name">No file chosen</span>
+              <button id="myCookieUpload" class="button button-primary" type="submit" disabled>Save & Continue</button>
+            </form>
+            <p id="myCookieStatus" class="cookie-status"></p>
+            <label class="share-toggle"><input id="shareToggle" type="checkbox"> <span>Help community — allow others to use my cookie when I'm idle <small>(you can toggle anytime)</small></span></label>
+            <p class="share-note">Your raw cookie is never shown to others; the server just tries it for those who don't want to upload.</p>
+          </div>
+
+          <div class="gate-panel" data-panel="community" hidden>
+            <p class="community-desc">Don't want to export? If someone shared, you can borrow a community cookie. We auto-pick the freshest shared cookie. Donors keep control — they can disable sharing anytime.</p>
+            <div id="poolInfo" class="pool-info"></div>
+            <button id="useCommunityBtn" class="button button-primary" type="button">Use Community Cookie & Continue</button>
+            <p id="communityStatus" class="cookie-status"></p>
+          </div>
+
+          <details class="cookie-details">
+            <summary>Is this safe? What about expiry?</summary>
+            <p>• <b>Safe:</b> Your cookie is stored at <code>/tmp/sonicscript-user-cookies/&lt;your_id&gt;/cookies.txt</code> with 600 permissions, never committed, never shown to others.</p>
+            <p>• <b>Expiry:</b> YouTube cookies expire in 2–4 weeks. When yours expires we’ll prompt you again on next submit. Shared cookies also auto-expire and are removed.</p>
+            <p>• <b>Choice every time:</b> On every <b>Submit link</b> we check: your own cookie → community pool → server global. You see this gate if none are usable.</p>
+          </details>
+        </div>
+
+        <!-- Legacy single-cookie help (kept for global fallback) -->
+        <div id="cookieHelp" class="cookie-help" hidden>
+          <div class="cookie-help-head">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.3 3 10.6c-.3.3-.4.8-.3 1.2l1.4 6.2c.2.8.9 1.4 1.7 1.4h10.4c.8 0 1.5-.6 1.7-1.4l1.4-6.2c.1-.4 0-.9-.3-1.2L13.7 3.3c-.4-.4-1-.4-1.4 0l-2 2Z"/></svg>
+            <div>
+              <strong>YouTube asked for verification</strong>
+              <p>Global fix — if per-user gate didn't appear, use this legacy upload.</p>
+            </div>
+            <button id="closeCookieHelp" class="clear-button" type="button" aria-label="Close">×</button>
+          </div>
+          <form id="cookieForm" class="cookie-upload">
+            <input id="cookieFile" type="file" accept=".txt,.cookies" hidden>
+            <button id="cookieBrowse" class="button button-secondary" type="button">Choose cookies.txt</button>
+            <span id="cookieFileName" class="cookie-file-name">No file chosen</span>
+            <button id="cookieUpload" class="button button-primary" type="submit" disabled>Upload &amp; retry</button>
+          </form>
+          <p id="cookieStatus" class="cookie-status" role="status"></p>
+        </div>
+
         <div class="trust-row" aria-label="Transcription capabilities">
           <div><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9h-3a6 6 0 0 1-6 6V3Z"/><path d="M14 3.2A9 9 0 0 1 20.8 10H14V3.2Z"/></svg><span><b>Auto-detects</b> spoken languages</span></div>
           <div><svg viewBox="0 0 24 24"><path d="M4 13v-2m4 5V8m4 11V5m4 11V8m4 5v-2"/></svg><span><b>Noise-aware</b> speech cleanup</span></div>

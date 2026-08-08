@@ -2,121 +2,290 @@
 
 A production-ready YouTube transcription web app with precise timeline selection, automatic multilingual speech recognition, noise-aware audio preprocessing, timestamped playback, AI refinement, and TXT/SRT/VTT/JSON exports.
 
-![Python](https://img.shields.io/badge/Python-3.12-17324d) ![FastAPI](https://img.shields.io/badge/FastAPI-0.116-0c9c72) ![Render](https://img.shields.io/badge/Deploy-Render-4de6b1)
+![Python](https://img.shields.io/badge/Python-3.12-17324d)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.116-0c9c72)
+![Render](https://img.shields.io/badge/Deploy-Render-4de6b1)
 
 ## What it does
 
-- Inspects a public YouTube URL and fetches its true title, thumbnail, and runtime.
-- Lets the user transcribe the entire video or choose an exact start/end timestamp.
-- Downloads only the selected timeline when possible, rather than always fetching the full video.
-- Uses FFmpeg to create a seekable audio overview and a separate speech-optimized, noise-reduced stream.
+- Inspects a public YouTube URL and fetches its title, thumbnail, and runtime.
+- Lets the user transcribe the entire video or choose an exact start and end timestamp.
+- Downloads only the selected timeline when possible instead of always fetching the complete video.
+- Uses FFmpeg to create a seekable audio overview and a separate speech-optimized, noise-reduced audio stream.
 - Splits long selections into overlapping 10-minute chunks so requests stay within provider limits without losing words at chunk boundaries.
-- Uses Whisper Large v3 with **automatic language detection**. It does not request translation, so Bangla, English, and code-switched speech stay in their spoken languages.
+- Uses Whisper Large v3 with automatic language detection.
+- Preserves Bangla, English, other languages, and code-switched speech without translating them.
 - Shows timestamped transcript segments that seek the selected audio when clicked.
-- Keeps an immutable original transcript and creates AI refinement as a separate version.
-- Exports TXT, SRT, VTT, and structured JSON. Subtitle timestamps map back to the original video's timeline.
-- Automatically removes temporary job files after the configured TTL.
+- Keeps the original transcript and creates AI refinement as a separate version.
+- Exports TXT, SRT, VTT, and structured JSON.
+- Maps subtitle timestamps back to the original video's timeline.
+- Automatically removes temporary job files after the configured expiration time.
 
-> Accuracy depends on the source audio and speech model. The preprocessing pipeline improves many noisy recordings, but no automatic speech recognizer can guarantee perfect text for every recording. The app deliberately presents refinement as a review aid and always preserves the original.
+> Accuracy depends on the source audio and speech-recognition model. The preprocessing pipeline can improve noisy recordings, but no automatic speech recognizer can guarantee perfect results for every recording. AI refinement is provided as a review aid, and the original transcript is always preserved.
 
 ## Architecture
 
-- **Web/API:** FastAPI + static responsive frontend
-- **Media:** `yt-dlp`, FFmpeg, and FFprobe
-- **Speech recognition:** OpenAI-compatible audio transcription endpoint; defaults to Groq `whisper-large-v3`
-- **Refinement:** OpenAI-compatible chat endpoint; defaults to Groq `llama-3.3-70b-versatile`
-- **Storage:** temporary local job directories (appropriate for Render's ephemeral disk)
+- **Web and API:** FastAPI with a responsive static frontend
+- **Media processing:** `yt-dlp`, FFmpeg, and FFprobe
+- **Speech recognition:** OpenAI-compatible transcription API using Groq `whisper-large-v3` by default
+- **AI refinement:** OpenAI-compatible chat API using Groq `llama-3.3-70b-versatile` by default
+- **Storage:** Temporary local job directories under `/tmp`
 
-No YouTube captions are read or required.
+YouTube captions are not required or used.
 
-## Deploy to Render
+## Deploy to Render Free
 
-The repository includes both `render.yaml` and a Dockerfile. Docker is used so FFmpeg is always installed.
+The repository includes a `render.yaml` file and a Dockerfile.
 
-1. Fork or push this repository to GitHub.
-2. In Render, choose **New → Blueprint** and connect the repository.
-3. Render detects `render.yaml` and creates the web service.
-4. Set the requested secret environment variable:
-   - `GROQ_API_KEY`: a Groq API key with access to the configured Whisper and chat models.
-5. Deploy. The health endpoint is `/health`.
+Docker is used so that FFmpeg, FFprobe, Node.js, Python, and the required application dependencies are installed automatically.
 
-The Starter plan or larger is recommended for enough memory, temporary disk, and request concurrency. The web server must use one process because job state is kept in memory; the included command does that.
+The Render Blueprint explicitly contains:
 
-### YouTube verification on cloud hosts
+```yaml
+plan: free
+```
 
-YouTube occasionally asks datacenter IPs to verify that a request is not automated. If this occurs for videos you are authorized to process, mount a Netscape-format cookie file as a Render secret file and set:
+Therefore, the Blueprint does not intentionally create a paid Render instance.
+
+It also does not create:
+
+- A paid persistent disk
+- A background worker service
+- A cron job
+- A managed database
+- A Redis instance
+- Any other paid Render service
+
+### Deployment steps
+
+1. Push this repository to GitHub.
+2. Log in to Render.
+3. Select **New**.
+4. Select **Blueprint**.
+5. Connect the GitHub repository.
+6. Render should automatically detect `render.yaml`.
+7. Confirm that the service shows the **Free** instance type.
+8. Add the requested `GROQ_API_KEY` environment variable.
+9. Deploy the Blueprint.
+
+The health-check endpoint is:
+
+```text
+/health
+```
+
+Do not continue if Render shows:
+
+- Starter
+- Standard
+- Pro
+- A monthly price
+- A paid persistent disk
+- A paid database
+- Any other paid resource
+
+Render account and verification policies can change independently of this repository. Always confirm that the Render deployment screen says **Free** before creating the service.
+
+## Render Free limitations
+
+The application is configured to run one transcription job at a time on Render Free:
+
+```yaml
+- key: MAX_CONCURRENT_JOBS
+  value: "1"
+```
+
+This reduces the chance of exceeding the Free instance's limited memory and CPU.
+
+When using Render Free:
+
+- The service may start slowly after a period of inactivity.
+- Long videos may take considerably longer to process.
+- Only one transcription should be processed at a time.
+- Temporary files disappear after a restart or new deployment.
+- Existing jobs may be lost when the service restarts.
+- The service should run with only one Uvicorn process.
+- Very long videos may exceed the practical resources of a Free instance.
+
+The application stores temporary files under:
+
+```text
+/tmp/sonicscript-jobs
+```
+
+No persistent disk is required.
+
+## Required API key
+
+The application requires a Groq API key for transcription and AI refinement.
+
+Create the following environment variable in Render:
+
+```env
+GROQ_API_KEY=gsk_your_key_here
+```
+
+Do not add the actual API key to GitHub, `render.yaml`, or the source code.
+
+Add it through the Render dashboard under:
+
+```text
+Environment → Environment Variables
+```
+
+## YouTube verification on cloud hosts
+
+YouTube may sometimes ask datacenter IP addresses to verify that a request is not automated.
+
+If this happens for videos you are authorized to process, you may configure a Netscape-format cookie file and set:
 
 ```env
 YTDLP_COOKIES_FILE=/path/to/secret/youtube-cookies.txt
 ```
 
-Do not commit browser cookies to Git. Cookies expire and must be maintained by the deployer. Follow YouTube's terms and transcribe only content you are allowed to process.
+Never commit YouTube cookies to GitHub.
+
+Cookies can expire and must be maintained by the person operating the deployment.
+
+Only download or transcribe videos you are authorized to process, and follow YouTube's terms and applicable laws.
 
 ## Local development
 
-Requirements: Python 3.12+, FFmpeg/FFprobe, and a Groq API key.
+### Requirements
+
+- Python 3.12 or later
+- FFmpeg
+- FFprobe
+- Node.js
+- Groq API key
+
+### Install
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+On Windows, activate the virtual environment with:
+
+```powershell
+.venv\Scripts\activate
+```
+
+Copy the example environment configuration:
+
+```bash
 cp .env.example .env
-# Export values from .env using your preferred environment loader:
-export GROQ_API_KEY="gsk_..."
+```
+
+Set your Groq API key:
+
+```env
+GROQ_API_KEY=gsk_your_key_here
+```
+
+Start the development server:
+
+```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Open <http://localhost:8000>. Interactive API docs are at <http://localhost:8000/api/docs>.
+Open:
 
-You can also run the production container:
+```text
+http://localhost:8000
+```
+
+Interactive API documentation is available at:
+
+```text
+http://localhost:8000/api/docs
+```
+
+## Run with Docker
+
+Build the Docker image:
 
 ```bash
 docker build -t sonicscript-ai .
-docker run --rm -p 10000:10000 -e GROQ_API_KEY="gsk_..." sonicscript-ai
+```
+
+Run it:
+
+```bash
+docker run --rm \
+  -p 10000:10000 \
+  -e GROQ_API_KEY="gsk_your_key_here" \
+  sonicscript-ai
+```
+
+Open:
+
+```text
+http://localhost:10000
 ```
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `GROQ_API_KEY` | — | Default key for transcription and refinement |
-| `TRANSCRIPTION_API_KEY` | `GROQ_API_KEY` | Optional dedicated speech API key |
-| `TRANSCRIPTION_BASE_URL` | `https://api.groq.com/openai/v1` | OpenAI-compatible API root |
+| `GROQ_API_KEY` | — | Default API key for transcription and refinement |
+| `TRANSCRIPTION_API_KEY` | `GROQ_API_KEY` | Optional dedicated speech-recognition API key |
+| `TRANSCRIPTION_BASE_URL` | `https://api.groq.com/openai/v1` | OpenAI-compatible transcription API root |
 | `TRANSCRIPTION_MODEL` | `whisper-large-v3` | Speech-to-text model |
-| `REFINEMENT_API_KEY` | `GROQ_API_KEY` | Optional dedicated refinement key |
-| `REFINEMENT_BASE_URL` | transcription URL | OpenAI-compatible chat API root |
-| `REFINEMENT_MODEL` | `llama-3.3-70b-versatile` | Transcript editor model |
-| `MAX_VIDEO_DURATION_SECONDS` | `21600` | Maximum accepted video runtime (6 hours) |
-| `TRANSCRIPTION_CHUNK_SECONDS` | `600` | Chunk size sent to speech model |
-| `MAX_CONCURRENT_JOBS` | `2` | Simultaneously processed jobs per instance |
-| `JOB_TTL_SECONDS` | `14400` | Idle job/audio retention (4 hours) |
-| `ENABLE_DENOISE` | `true` | FFmpeg speech denoising stage |
-| `YTDLP_COOKIES_FILE` | — | Optional server-side YouTube cookies path |
+| `REFINEMENT_API_KEY` | `GROQ_API_KEY` | Optional dedicated AI-refinement API key |
+| `REFINEMENT_BASE_URL` | Transcription URL | OpenAI-compatible chat API root |
+| `REFINEMENT_MODEL` | `llama-3.3-70b-versatile` | Transcript-refinement model |
+| `MAX_VIDEO_DURATION_SECONDS` | `21600` | Maximum accepted video runtime in seconds |
+| `TRANSCRIPTION_CHUNK_SECONDS` | `600` | Audio chunk size sent to the speech model |
+| `MAX_CONCURRENT_JOBS` | `2` in app, `1` on Render Free | Simultaneously processed transcription jobs |
+| `JOB_TTL_SECONDS` | `14400` | Temporary job and audio retention |
+| `ENABLE_DENOISE` | `true` | Enables FFmpeg speech denoising |
+| `YTDLP_COOKIES_FILE` | — | Optional YouTube cookie-file location |
 
-If using OpenAI instead of Groq, set the transcription/refinement base URLs, model names, and API keys explicitly. The selected audio chunks are mono 16 kHz MP3 files.
+If you use an API provider other than Groq, configure the base URLs, API keys, and model names explicitly.
 
 ## API overview
 
-- `POST /api/videos/inspect` — validate URL and retrieve metadata
-- `POST /api/jobs` — start a timeline transcription
-- `GET /api/jobs/{id}` — poll job/transcript/refinement state
-- `DELETE /api/jobs/{id}` — cancel and remove a job
-- `GET /api/jobs/{id}/audio` — stream the selected audio overview
-- `POST /api/jobs/{id}/refine` — start non-destructive AI refinement
-- `GET /api/jobs/{id}/download?format=srt` — export transcript
-- `GET /health` — deployment health check
+- `POST /api/videos/inspect` — Validate a YouTube URL and retrieve video metadata
+- `POST /api/jobs` — Start a timeline transcription job
+- `GET /api/jobs/{id}` — Retrieve the transcription and refinement status
+- `DELETE /api/jobs/{id}` — Cancel and remove a job
+- `GET /api/jobs/{id}/audio` — Stream the selected audio overview
+- `POST /api/jobs/{id}/refine` — Start non-destructive AI refinement
+- `GET /api/jobs/{id}/download?format=txt` — Export plain text
+- `GET /api/jobs/{id}/download?format=srt` — Export SRT captions
+- `GET /api/jobs/{id}/download?format=vtt` — Export WebVTT captions
+- `GET /api/jobs/{id}/download?format=json` — Export structured JSON
+- `GET /health` — Render deployment health check
 
 ## Tests
 
+Run the unit tests:
+
 ```bash
 python -m unittest discover -s tests -v
+```
+
+Check Python syntax:
+
+```bash
 python -m compileall -q app
+```
+
+Check JavaScript syntax:
+
+```bash
 node --check app/static/app.js
 ```
 
 ## Privacy and operational notes
 
 - URLs, selected audio, and transcripts are processed by the server and the configured AI provider.
-- Job data is not stored in a database. It lives in memory and under `/tmp/sonicscript-jobs`, then expires after the TTL or disappears on a restart/deploy.
-- Do not run multiple Uvicorn workers without moving job state and files to shared storage/queues.
-- Rate limits and usage costs are determined by the configured provider.
+- Job information is stored temporarily in memory.
+- Temporary files are stored under `/tmp/sonicscript-jobs`.
+- Temporary data may disappear after a restart or deployment.
+- Do not run multiple Uvicorn workers unless job state and files are moved to shared storage.
+- API usage limits and costs are determined by the configured AI provider.
+- The Render web service can remain free, but the AI provider may have separate limits or costs.

@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Accurate, timeline-precise multilingual YouTube transcription with AI refinement and audio playback.">
+  <meta name="theme-color" content="#08131f">
+  <title>SonicScript AI — Hear every word</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%2308131f%22/><path d=%22M7 17h3l2-7 3 14 3-17 3 12 2-5h3%22 fill=%22none%22 stroke=%22%234de6b1%22 stroke-width=%222%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="noise" aria-hidden="true"></div>
+  <header class="site-header">
+    <nav class="nav shell" aria-label="Primary navigation">
+      <a class="brand" href="#top" aria-label="SonicScript AI home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <span>SonicScript</span><em>AI</em>
+      </a>
+      <div class="nav-links">
+        <a href="#workflow">How it works</a>
+        <a href="#features">Accuracy</a>
+        <span id="engineStatus" class="engine-status"><i></i><span>Checking engine</span></span>
+      </div>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section id="landingView" class="landing-view">
+      <div class="hero shell">
+        <div class="eyebrow"><span class="eyebrow-wave">⌁</span> Speech, understood as spoken</div>
+        <h1>Every word.<br><span>Every language.</span><br>Right on time.</h1>
+        <p class="hero-copy">Turn any public YouTube video into a precise, timestamped transcript—even without captions, through noise, accents, and natural language switching.</p>
+
+        <form id="inspectForm" class="url-card" novalidate>
+          <label for="youtubeUrl">YouTube video link</label>
+          <div class="url-row">
+            <div class="url-input-wrap">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12s0-3.5-.44-5.2a2.8 2.8 0 0 0-1.98-1.98C17.84 4.35 12 4.35 12 4.35s-5.84 0-7.58.47A2.8 2.8 0 0 0 2.44 6.8C2 8.5 2 12 2 12s0 3.5.44 5.2a2.8 2.8 0 0 0 1.98 1.98c1.74.47 7.58.47 7.58.47s5.84 0 7.58-.47a2.8 2.8 0 0 0 1.98-1.98C22 15.5 22 12 22 12Z"/><path class="play-path" d="m10 15.5 5-3.5-5-3.5v7Z"/></svg>
+              <input id="youtubeUrl" type="url" inputmode="url" autocomplete="url" placeholder="https://youtube.com/watch?v=…" required aria-describedby="urlHelp urlError">
+              <button id="clearUrl" class="clear-button" type="button" aria-label="Clear link" hidden>×</button>
+            </div>
+            <button id="inspectButton" class="button button-primary inspect-button" type="submit">
+              <span>Get video</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+              <i class="spinner" aria-hidden="true"></i>
+            </button>
+          </div>
+          <div class="form-meta">
+            <span id="urlHelp">Paste a public youtube.com or youtu.be link</span>
+            <span id="urlError" class="field-error" role="alert"></span>
+          </div>
+        </form>
+
+        <div class="trust-row" aria-label="Transcription capabilities">
+          <div><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9h-3a6 6 0 0 1-6 6V3Z"/><path d="M14 3.2A9 9 0 0 1 20.8 10H14V3.2Z"/></svg><span><b>Auto-detects</b> spoken languages</span></div>
+          <div><svg viewBox="0 0 24 24"><path d="M4 13v-2m4 5V8m4 11V5m4 11V8m4 5v-2"/></svg><span><b>Noise-aware</b> speech cleanup</span></div>
+          <div><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg><span><b>No captions</b> required</span></div>
+        </div>
+      </div>
+
+      <section id="videoSetup" class="setup-section shell" hidden aria-labelledby="setupTitle">
+        <div class="section-kicker">01 · Select your timeline</div>
+        <div class="setup-grid">
+          <article class="video-card">
+            <div class="thumbnail-wrap">
+              <img id="videoThumbnail" alt="" referrerpolicy="no-referrer">
+              <span id="videoDurationBadge" class="duration-badge"></span>
+              <span class="thumbnail-play" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m9 7 8 5-8 5V7Z"/></svg></span>
+            </div>
+            <div class="video-info">
+              <div class="source-label"><i></i> YouTube video</div>
+              <h2 id="setupTitle"></h2>
+              <p><span id="videoChannel"></span><span aria-hidden="true"> · </span><span id="videoDurationText"></span></p>
+            </div>
+          </article>
+
+          <article class="timeline-card">
+            <div class="card-heading">
+              <div>
+                <span class="mini-label">Transcription range</span>
+                <h3>Choose what to listen to</h3>
+              </div>
+              <span id="selectedDuration" class="selection-length">00:00 selected</span>
+            </div>
+
+            <div class="mode-switch" role="radiogroup" aria-label="Timeline mode">
+              <label><input type="radio" name="rangeMode" value="full" checked><span>Full video</span></label>
+              <label><input type="radio" name="rangeMode" value="custom"><span>Precise range</span></label>
+            </div>
+
+            <div id="timelineControls" class="timeline-controls is-disabled">
+              <div id="rangeVisual" class="range-visual">
+                <div class="range-track"></div>
+                <div class="range-fill"></div>
+                <input id="startRange" type="range" min="0" max="100" step="0.1" value="0" aria-label="Selection start">
+                <input id="endRange" type="range" min="0" max="100" step="0.1" value="100" aria-label="Selection end">
+              </div>
+              <div class="time-inputs">
+                <label><span>Starts at</span><div><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v5l3 2"/></svg><input id="startTime" value="00:00" inputmode="numeric" aria-label="Start time"></div></label>
+                <span class="time-arrow" aria-hidden="true">→</span>
+                <label><span>Ends at</span><div><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v5l3 2"/></svg><input id="endTime" value="00:00" inputmode="numeric" aria-label="End time"></div></label>
+              </div>
+              <p id="timelineError" class="timeline-error" role="alert"></p>
+            </div>
+
+            <div class="pipeline-note">
+              <span class="pipeline-icon"><svg viewBox="0 0 24 24"><path d="M12 2 9.5 8.5 3 11l6.5 2.5L12 20l2.5-6.5L21 11l-6.5-2.5L12 2Z"/></svg></span>
+              <div><strong>Precision pipeline on</strong><p>Audio is normalized, noise-reduced, split safely, and transcribed in its original language.</p></div>
+              <span class="on-badge">ON</span>
+            </div>
+
+            <button id="startButton" class="button button-primary start-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M5 11v1a7 7 0 0 0 14 0v-1M12 19v3m-4 0h8"/></svg>
+              <span>Transcribe selection</span>
+              <i class="spinner" aria-hidden="true"></i>
+            </button>
+            <p class="privacy-note"><svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg> Temporary processing files expire automatically.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="workflow" class="workflow-section shell">
+        <div class="section-kicker">Built for difficult audio</div>
+        <div class="workflow-header">
+          <h2>From link to language,<br>without the guesswork.</h2>
+          <p>One careful pipeline handles the details that ordinary caption grabbers miss.</p>
+        </div>
+        <div class="workflow-grid">
+          <article><span>01</span><div class="feature-icon"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg></div><h3>Inspect</h3><p>We fetch the real runtime and let you choose the exact second to begin and end.</p></article>
+          <article><span>02</span><div class="feature-icon"><svg viewBox="0 0 24 24"><path d="M4 13v-2m4 5V8m4 11V5m4 11V8m4 5v-2"/></svg></div><h3>Listen deeply</h3><p>Speech-focused preprocessing helps the model hear through hiss, hum, and low volume.</p></article>
+          <article><span>03</span><div class="feature-icon"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8m-8 4h8m-8 4h5"/></svg></div><h3>Review & export</h3><p>Play the selected audio, jump by timestamp, refine with AI, then export TXT, SRT, VTT, or JSON.</p></article>
+        </div>
+      </section>
+
+      <section id="features" class="language-band">
+        <div class="shell language-inner">
+          <div><span class="pulse-ring"><i></i></span><p>বাংলা</p><p>English</p><p>हिन्दी</p><p>Español</p><p>العربية</p><p>日本語</p></div>
+          <h2>Language switching stays language switching.</h2>
+          <p>SonicScript detects speech automatically and transcribes each passage as spoken. It does not force your whole video into one language or translate code-switched conversation.</p>
+        </div>
+      </section>
+    </section>
+
+    <section id="processingView" class="processing-view shell" hidden aria-live="polite">
+      <div class="processing-orbit" aria-hidden="true"><i></i><i></i><i></i><span class="brand-mark"><b></b><b></b><b></b><b></b><b></b></span></div>
+      <span class="section-kicker">Listening in progress</span>
+      <h1 id="processingTitle">Preparing your transcript</h1>
+      <p id="processingStage">Fetching the selected audio from YouTube</p>
+      <div class="progress-wrap"><div><i id="progressBar"></i></div><span id="progressPercent">0%</span></div>
+      <div id="processingVideo" class="processing-video"><img alt=""><div><strong></strong><span></span></div></div>
+      <button id="cancelButton" class="button button-ghost" type="button">Cancel transcription</button>
+    </section>
+
+    <section id="resultView" class="result-view shell" hidden>
+      <div class="result-topbar">
+        <button id="newTranscriptButton" class="back-button" type="button"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg> New transcript</button>
+        <div class="complete-chip"><i></i> Transcription complete</div>
+      </div>
+      <div class="result-heading">
+        <div><span class="section-kicker">Your transcript</span><h1 id="resultTitle"></h1><p id="resultMeta"></p></div>
+        <div class="result-actions">
+          <button id="copyButton" class="button button-secondary" type="button"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg><span>Copy</span></button>
+          <div class="download-wrap">
+            <button id="downloadButton" class="button button-dark" type="button" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M5 21h14"/></svg>Download<svg class="chevron" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></svg></button>
+            <div id="downloadMenu" class="download-menu" hidden>
+              <button data-format="txt"><strong>Plain text</strong><span>.TXT</span></button>
+              <button data-format="srt"><strong>SubRip captions</strong><span>.SRT</span></button>
+              <button data-format="vtt"><strong>Web captions</strong><span>.VTT</span></button>
+              <button data-format="json"><strong>Data + timestamps</strong><span>.JSON</span></button>
+              <small>Caption files use original video time.</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="result-layout">
+        <aside class="overview-column">
+          <article class="audio-card">
+            <div class="audio-cover"><img id="resultThumbnail" alt=""><div class="cover-shade"></div><span class="now-playing"><i></i> Audio overview</span></div>
+            <div class="audio-body">
+              <div class="audio-title"><div><span>Selected timeline</span><strong id="audioRange"></strong></div><span id="audioDuration"></span></div>
+              <audio id="audioPlayer" controls preload="metadata"></audio>
+              <p>Click any transcript timestamp to seek here.</p>
+            </div>
+          </article>
+          <article class="insight-card">
+            <span class="mini-label">Transcript details</span>
+            <div><span>Words</span><strong id="wordCount">—</strong></div>
+            <div><span>Segments</span><strong id="segmentCount">—</strong></div>
+            <div class="language-detail"><span>Detected speech</span><strong id="languageList">—</strong></div>
+          </article>
+          <article class="accuracy-card"><svg viewBox="0 0 24 24"><path d="M12 3 4 6v5c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V6l-8-3Z"/><path d="m8 12 2.5 2.5L16 9"/></svg><div><strong>Original is always protected</strong><p>AI refinement creates a separate version. Your source transcript is never overwritten.</p></div></article>
+        </aside>
+
+        <article class="transcript-card">
+          <div class="transcript-toolbar">
+            <div class="transcript-tabs" role="tablist">
+              <button id="originalTab" class="active" type="button" role="tab" aria-selected="true">Original</button>
+              <button id="refinedTab" type="button" role="tab" aria-selected="false">AI refined <span id="refinedDot"></span></button>
+            </div>
+            <label class="search-box"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg><input id="transcriptSearch" type="search" placeholder="Find in transcript" aria-label="Find in transcript"></label>
+          </div>
+          <div id="refineBanner" class="refine-banner">
+            <div class="refine-symbol"><svg viewBox="0 0 24 24"><path d="M12 2 9.5 8.5 3 11l6.5 2.5L12 20l2.5-6.5L21 11l-6.5-2.5L12 2Z"/></svg></div>
+            <div><strong>Give it a careful second pass</strong><p>AI corrects likely recognition and punctuation issues without translating or changing the meaning.</p></div>
+            <button id="refineButton" class="button button-refine" type="button"><span>Refine with AI</span><i class="spinner"></i></button>
+          </div>
+          <div id="refinementProgress" class="refinement-progress" hidden><div><span>AI is reviewing your transcript…</span><b>0%</b></div><i><em></em></i></div>
+          <div id="transcriptContent" class="transcript-content" role="tabpanel"></div>
+          <div id="refinedContent" class="refined-content" role="tabpanel" hidden></div>
+          <div id="emptySearch" class="empty-search" hidden>No transcript lines match that search.</div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell"><a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span><span>SonicScript</span><em>AI</em></a><p>Speech stays true to the source.</p><span>Built for multilingual voices.</span></div>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg><span></span></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

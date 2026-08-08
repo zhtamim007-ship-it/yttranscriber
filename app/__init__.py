@@ -1,0 +1,1 @@
+"""SonicScript AI application package."""

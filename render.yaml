@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: sonicscript-ai
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: MAX_CONCURRENT_JOBS
+        value: "2"
+      - key: JOB_TTL_SECONDS
+        value: "14400"
+      - key: ENABLE_DENOISE
+        value: "true"
+      - key: PYTHON_VERSION
+        value: "3.12"

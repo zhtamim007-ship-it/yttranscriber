@@ -56,6 +56,20 @@ class Settings:
     transcription_base_url: str = os.getenv("TRANSCRIPTION_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
     transcription_model: str = os.getenv("TRANSCRIPTION_MODEL", "whisper-large-v3")
     transcription_api_key: str | None = os.getenv("TRANSCRIPTION_API_KEY") or os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY")
+    # How many upload attempts per (model, encoding) combination before moving
+    # to the next fallback. The primary combination gets the full budget;
+    # fallback combinations get 2 attempts each.
+    transcription_max_attempts: int = int(os.getenv("TRANSCRIPTION_MAX_ATTEMPTS", "5"))
+    # Upper bound for backoff sleeps (seconds) when the provider does not send
+    # a Retry-After header.
+    transcription_retry_after_cap: int = int(os.getenv("TRANSCRIPTION_RETRY_AFTER_CAP_SECONDS", "45"))
+    # Extra models tried only when the configured model keeps returning
+    # transient server errors (HTTP 500/502/503/504), never on auth failures.
+    transcription_model_fallbacks: tuple[str, ...] = tuple(
+        name.strip()
+        for name in os.getenv("TRANSCRIPTION_MODEL_FALLBACKS", "whisper-large-v3-turbo").split(",")
+        if name.strip()
+    )
 
     refinement_base_url: str = os.getenv("REFINEMENT_BASE_URL", os.getenv("TRANSCRIPTION_BASE_URL", "https://api.groq.com/openai/v1")).rstrip("/")
     refinement_model: str = os.getenv("REFINEMENT_MODEL", "llama-3.3-70b-versatile")

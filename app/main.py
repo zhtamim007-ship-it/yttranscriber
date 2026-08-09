@@ -259,6 +259,20 @@ async def get_job(job_id: str) -> dict:
     return job.public()
 
 
+@app.post("/api/jobs/{job_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_job(job_id: str) -> dict:
+    """Re-queue a failed or cancelled job. When the audio was already
+    downloaded, the retry skips the YouTube download and goes straight back
+    to transcription — the common case after a transient provider outage."""
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="This transcript expired or does not exist.")
+    if job.status not in {"failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Only a failed or cancelled job can be retried.")
+    manager.retry(job)
+    return job.public()
+
+
 @app.delete("/api/jobs/{job_id}", status_code=204)
 async def delete_job(job_id: str) -> Response:
     job = manager.get(job_id)

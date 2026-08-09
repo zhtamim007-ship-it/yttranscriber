@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import random
 import shutil
 import sys
 import time
@@ -37,6 +38,9 @@ class Job:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     error: str | None = None
+    # True when the failure is transient (provider outage / network) and the
+    # job can be safely retried without any user-side change.
+    retryable: bool = False
     segments: list[dict[str, Any]] = field(default_factory=list)
     transcript: str = ""
     languages: list[dict[str, Any]] = field(default_factory=list)
@@ -79,6 +83,7 @@ class Job:
             "stage": self.stage,
             "progress": self.progress,
             "error": self.error,
+            "retryable": self.retryable,
             "video": self.video,
             "selection": {
                 "start": self.start_seconds,
@@ -209,6 +214,80 @@ _JS_RUNTIME_MESSAGE = (
     "yt-dlp[default,deno] pip extra. Redeploy with the updated image, or install one "
     "of those runtimes and restart."
 )
+
+# HTTP statuses that indicate a *transient* transcription-provider failure
+# (rate limit, overload, gateway issue, or a dropped connection). These are
+# worth retrying with backoff; `None` means the request never got an answer
+# (timeout / network error) and is also transient.
+_TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+
+
+def _is_transient_status(status: int | None) -> bool:
+    return status is None or status in _TRANSIENT_STATUS_CODES
+
+
+def _backoff_delay(attempt: int, retry_after: str | None = None, cap: float = 45.0) -> float:
+    """Exponential backoff with jitter, honoring the provider's Retry-After header.
+
+    - attempt 0, 1, 2, ... without Retry-After -> 1s, 2s, 4s, ... (capped).
+    - Retry-After wins when the provider explicitly tells us to wait.
+    - The ±10% jitter spreads retries so concurrent jobs do not stampede the
+      provider in lockstep after an outage.
+    """
+    base = 2.0 ** attempt
+    if retry_after:
+        try:
+            base = float(retry_after)
+        except (TypeError, ValueError):
+            pass
+    base = max(0.5, min(base, cap))
+    return round(base * (0.9 + random.random() * 0.2), 3)
+
+
+def _fallback_encoding_for_duration(duration: float) -> str:
+    """Pick the fallback re-encode format for a chunk of `duration` seconds.
+
+    WAV (PCM s16le, 16 kHz mono) is the most universally decodable format for
+    speech APIs (Groq/OpenAI list `wav` explicitly) and avoids the whole class
+    of server-side MP3 header/XING decode failures, but it is large:
+    duration * 32000 bytes. Stay under the common 25 MB upload cap; beyond it
+    fall back to a clean CBR MP3 with minimal metadata instead.
+    """
+    if duration * 32000 <= 24 * 1024 * 1024:
+        return "wav"
+    return "mp3"
+
+
+def _transcription_failure_message(
+    status: int | None,
+    detail: str,
+    models_tried: list[str],
+    saw_404: bool,
+) -> str:
+    """Build a user-facing message after all retries/fallbacks are exhausted."""
+    if status in {401, 403}:
+        return "The transcription API key was rejected. Update GROQ_API_KEY on the server."
+    if saw_404 and status == 404:
+        return (
+            "The transcription model was not found on the provider "
+            f"({', '.join(models_tried)}). Check TRANSCRIPTION_MODEL / TRANSCRIPTION_MODEL_FALLBACKS."
+        )
+    if status is None:
+        return (
+            "The speech provider could not be reached (network timeout). This is usually "
+            "temporary — press Retry in a minute or two; nothing needs to change on your side."
+        )
+    if status in {413, 415}:
+        return f"The speech provider rejected this audio file (HTTP {status}). {detail[:200]}"
+    if status in {400, 422}:
+        # The provider rejected the request itself; retrying won't help.
+        return f"The speech model could not process this audio. {detail[:300]}"
+    # 408/429/500/502/503/504: transient provider-side failure.
+    return (
+        f"The speech provider is temporarily unable to process audio (HTTP {status} — {detail[:140]}). "
+        "This is a temporary issue on the provider's side — press Retry in a few minutes; "
+        "nothing needs to change on your side."
+    )
 
 
 def _base_ydl_options(
@@ -386,6 +465,30 @@ class JobManager:
         job.task = asyncio.create_task(self._run(job), name=f"transcribe-{job.id}")
         return job
 
+    def retry(self, job: Job) -> Job:
+        """Re-queue a failed/cancelled job. If the audio was already downloaded
+        successfully, the retry skips the YouTube download entirely and goes
+        straight back to transcription — the common case after a transient
+        provider outage."""
+        if job.task and not job.task.done():
+            return job
+        job.cancel_requested = False
+        job.retryable = False
+        job.error = None
+        job.segments = []
+        job.transcript = ""
+        job.languages = []
+        job.refined_transcript = None
+        job.refinement_status = "idle"
+        job.refinement_progress = 0
+        job.refinement_error = None
+        job.status = "queued"
+        job.stage = "Waiting for a transcription slot"
+        job.progress = 2
+        job.updated_at = time.time()
+        job.task = asyncio.create_task(self._run(job), name=f"transcribe-{job.id}")
+        return job
+
     def cleanup_expired(self) -> None:
         cutoff = time.time() - settings.job_ttl_seconds
         for job_id, job in list(self.jobs.items()):
@@ -412,10 +515,15 @@ class JobManager:
                     return
                 if not settings.transcription_api_key:
                     raise ServiceError("Transcription is not configured. Add GROQ_API_KEY to the server environment, then try again.")
-                job.touch(status="downloading", stage="Fetching the selected audio from YouTube", progress=5)
-                await self._download_audio(job)
-                self._check_cancelled(job)
-                job.touch(status="processing", stage="Optimizing speech for noisy audio", progress=30)
+                if job.audio_path and job.audio_path.exists():
+                    # Retry after a provider-side failure: the audio is already
+                    # prepared, so jump straight back to transcription.
+                    job.touch(status="processing", stage="Using the previously downloaded audio", progress=30)
+                else:
+                    job.touch(status="downloading", stage="Fetching the selected audio from YouTube", progress=5)
+                    await self._download_audio(job)
+                    self._check_cancelled(job)
+                    job.touch(status="processing", stage="Optimizing speech for noisy audio", progress=30)
                 await self._transcribe(job)
                 self._check_cancelled(job)
                 job.touch(status="complete", stage="Transcript ready", progress=100)
@@ -548,7 +656,7 @@ class JobManager:
         source = max(candidates, key=lambda path: path.stat().st_size)
         selected = job.directory / "selected-audio.mp3"
         await self._run_command([
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
             "-i", str(source), "-t", str(job.selected_duration),
             "-vn", "-map_metadata", "-1", "-ac", "1", "-ar", "16000",
             "-b:a", "64k", str(selected),
@@ -575,7 +683,7 @@ class JobManager:
 
     async def _audio_duration(self, path: Path, job: Job) -> float:
         output = await self._run_command([
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "ffprobe", "-v", "error", "-nostdin", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", str(path),
         ], job, "Could not inspect the prepared audio")
         try:
@@ -592,7 +700,7 @@ class JobManager:
         if settings.denoise:
             filters += ",afftdn=nr=10:nf=-35,dynaudnorm=f=150:g=12"
         await self._run_command([
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
             "-ss", str(actual_start), "-i", str(job.audio_path),
             "-t", str(actual_duration), "-vn", "-ac", "1", "-ar", "16000",
             "-af", filters, "-b:a", "64k", str(output),
@@ -621,8 +729,10 @@ class JobManager:
                     progress=35 + (index / chunk_count) * 57,
                 )
                 chunk_path, chunk_offset = await self._make_chunk(job, index, desired_start, duration)
-                data = await self._request_transcription(client, chunk_path)
-                chunk_path.unlink(missing_ok=True)
+                data = await self._request_transcription(client, chunk_path, job)
+                # Remove the chunk and any fallback re-encodes produced for it.
+                for stray in job.directory.glob(f"speech-{index:04d}.*"):
+                    stray.unlink(missing_ok=True)
 
                 language = str(data.get("language") or "unknown").strip()
                 language_counts[language] = language_counts.get(language, 0) + 1
@@ -664,40 +774,178 @@ class JobManager:
         ] or [{"code": "auto", "name": "Auto-detected", "parts": chunk_count}]
         job.touch(status="processing", stage="Aligning timestamps and building your transcript", progress=96)
 
-    async def _request_transcription(self, client: httpx.AsyncClient, path: Path) -> dict[str, Any]:
+    async def _request_transcription(self, client: httpx.AsyncClient, path: Path, job: Job) -> dict[str, Any]:
+        """Transcribe one chunk, surviving transient provider failures.
+
+        Providers such as Groq occasionally answer transcription requests with
+        HTTP 500 "Internal server error" (see
+        https://console.groq.com/docs/errors) — usually a temporary overload or
+        an incident on their side, but sometimes a decode failure for a
+        particular audio encoding. We therefore escalate through three layers
+        before giving up:
+
+        1. Retry the same file with exponential backoff (+ jitter, honoring
+           Retry-After) — handles short-lived outages.
+        2. Re-encode the chunk to a maximally-compatible format (WAV PCM,
+           or clean CBR MP3 when WAV would exceed the 25 MB upload cap) and
+           retry — handles server-side decode failures of the MP3 encoding.
+        3. Try the configured fallback transcription models
+           (TRANSCRIPTION_MODEL_FALLBACKS) — handles incidents where one
+           model endpoint is degraded while others still work.
+
+        Auth failures (401/403) and permanent request rejections (400/413/
+        415/422) fail fast with a precise message; everything else marks the
+        job as retryable so the UI can offer a one-click Retry.
+        """
         url = f"{settings.transcription_base_url}/audio/transcriptions"
-        last_error = ""
-        for attempt in range(4):
-            try:
-                with path.open("rb") as audio:
-                    response = await client.post(
-                        url,
-                        headers={"Authorization": f"Bearer {settings.transcription_api_key}"},
-                        data={
-                            "model": settings.transcription_model,
-                            "response_format": "verbose_json",
-                            "temperature": "0",
-                        },
-                        files={"file": (path.name, audio, "audio/mpeg")},
-                    )
-                if response.status_code < 400:
-                    return response.json()
-                try:
-                    payload = response.json()
-                    last_error = payload.get("error", {}).get("message") or response.text
-                except (ValueError, AttributeError):
-                    last_error = response.text
-                if response.status_code not in {408, 429, 500, 502, 503, 504}:
-                    break
-                retry_after = float(response.headers.get("retry-after", 0) or 0)
-                await asyncio.sleep(max(retry_after, 2 ** attempt))
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                last_error = str(exc)
-                if attempt < 3:
-                    await asyncio.sleep(2 ** attempt)
-        if "api key" in last_error.lower() or "authentication" in last_error.lower():
-            raise ServiceError("The transcription API key was rejected. Update GROQ_API_KEY on the server.")
-        raise ServiceError(f"The speech model could not process this audio. {last_error[:300]}")
+        models = [settings.transcription_model, *settings.transcription_model_fallbacks]
+        encodings: list[tuple[str, Path | None]] = [("prepared", path), ("fallback", None)]
+
+        last_status: int | None = None
+        last_detail = ""
+        saw_transient = False
+        saw_404 = False
+        saw_permanent = False
+        fallback_path: Path | None = None
+
+        # Full retry budget for the primary (model, encoding) combination;
+        # tighter budgets for every fallback combination.
+        attempts_budget = max(2, settings.transcription_max_attempts)
+        for model in models:
+            for encoding_name, encoding_path in encodings:
+                attempts = attempts_budget
+                attempts_budget = 2  # fallback combinations get fewer tries
+                if encoding_name == "fallback":
+                    if fallback_path is None:
+                        fallback_path = await self._make_fallback_encoding(job, path)
+                    encoding_path = fallback_path
+                if encoding_path is None or not encoding_path.exists():
+                    continue
+                mime = "audio/wav" if encoding_path.suffix == ".wav" else "audio/mpeg"
+                for attempt in range(attempts):
+                    try:
+                        with encoding_path.open("rb") as audio:
+                            response = await client.post(
+                                url,
+                                headers={"Authorization": f"Bearer {settings.transcription_api_key}"},
+                                data={
+                                    "model": model,
+                                    "response_format": "verbose_json",
+                                    "temperature": "0",
+                                },
+                                files={"file": (encoding_path.name, audio, mime)},
+                            )
+                    except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                        last_status = None
+                        last_detail = str(exc)
+                        saw_transient = True
+                        if attempt < attempts - 1:
+                            await asyncio.sleep(_backoff_delay(attempt, cap=settings.transcription_retry_after_cap))
+                        continue
+
+                    last_status = response.status_code
+                    last_detail = self._error_detail(response)
+
+                    if response.status_code < 400:
+                        try:
+                            return response.json()
+                        except ValueError:
+                            # 2xx but unreadable body — treat like a transient
+                            # provider failure and retry.
+                            last_status = None
+                            last_detail = "The provider returned an unreadable response (invalid JSON)."
+                            saw_transient = True
+                            if attempt < attempts - 1:
+                                await asyncio.sleep(_backoff_delay(attempt, cap=settings.transcription_retry_after_cap))
+                            continue
+
+                    if response.status_code in {401, 403}:
+                        raise ServiceError(
+                            "The transcription API key was rejected. Update GROQ_API_KEY on the server."
+                        )
+                    if response.status_code == 404:
+                        saw_404 = True
+                        last_status = 404
+                        continue  # this model is not available — try the next one
+                    if _is_transient_status(response.status_code):
+                        saw_transient = True
+                    else:
+                        saw_permanent = True
+                        # A permanent rejection won't be fixed by retrying the
+                        # same file, but a different encoding/model might.
+                        break
+                    if attempt < attempts - 1:
+                        retry_after = response.headers.get("retry-after")
+                        await asyncio.sleep(_backoff_delay(attempt, retry_after, cap=settings.transcription_retry_after_cap))
+
+        if fallback_path is not None:
+            fallback_path.unlink(missing_ok=True)
+
+        if not saw_transient:
+            # Every attempt was a permanent rejection (or model-not-found).
+            if saw_404 and not saw_permanent:
+                raise ServiceError(
+                    f"The transcription model was not found on the provider ({', '.join(models)}). "
+                    "Check TRANSCRIPTION_MODEL / TRANSCRIPTION_MODEL_FALLBACKS on the server."
+                )
+            raise ServiceError(_transcription_failure_message(last_status, last_detail, models, saw_404))
+
+        # Transient provider failure across every model/encoding/attempt.
+        job.retryable = True
+        raise ServiceError(_transcription_failure_message(last_status, last_detail, models, saw_404))
+
+    @staticmethod
+    def _error_detail(response: httpx.Response) -> str:
+        try:
+            payload = response.json()
+            message = payload.get("error", {}).get("message")
+            if message:
+                return str(message)
+        except (ValueError, AttributeError, TypeError):
+            pass
+        text = response.text.strip()
+        return text[:300] or f"HTTP {response.status_code}"
+
+    async def _make_fallback_encoding(self, job: Job, source: Path) -> Path | None:
+        """Re-encode a chunk into a more provider-friendly container.
+
+        Returns the new path, or None when the source is unusable. WAV (PCM
+        s16le 16 kHz mono) is explicitly supported by Groq/OpenAI and avoids
+        the class of server-side MP3 decode failures that surface as HTTP 500;
+        for chunks too large for a 25 MB WAV we emit a clean CBR MP3 with no
+        XING/ID3 metadata instead.
+        """
+        try:
+            duration = await self._audio_duration(source, job)
+        except (ServiceError, OSError):
+            return None
+        if duration <= 0:
+            return None
+        try:
+            if _fallback_encoding_for_duration(duration) == "wav":
+                output = source.with_suffix(".wav")
+                await self._run_command([
+                    "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+                    "-i", str(source), "-vn", "-ac", "1", "-ar", "16000",
+                    "-c:a", "pcm_s16le", str(output),
+                ], job, "Audio re-encode failed")
+            else:
+                output = source.with_suffix(".fallback.mp3")
+                await self._run_command([
+                    "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+                    "-i", str(source), "-vn", "-ac", "1", "-ar", "16000",
+                    "-c:a", "libmp3lame", "-b:a", "128k",
+                    "-write_xing", "0", "-id3v2_version", "0", str(output),
+                ], job, "Audio re-encode failed")
+        except (ServiceError, OSError, FileNotFoundError):
+            # The fallback is best-effort: if we cannot produce it, keep going
+            # with the original file rather than failing the whole job.
+            output.unlink(missing_ok=True)
+            return None
+        if not output.exists() or output.stat().st_size < 1000:
+            output.unlink(missing_ok=True)
+            return None
+        return output
 
     def refine(self, job: Job) -> None:
         if job.refinement_task and not job.refinement_task.done():

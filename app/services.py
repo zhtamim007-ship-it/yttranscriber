@@ -124,28 +124,39 @@ def _cookies_file(user_id: str | None = None) -> tuple[str | None, str | None]:
     return resolved, "shared"
 
 
-def _base_ydl_options(user_id: str | None = None) -> dict[str, Any]:
-    opts: dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
-        "extract_flat": False,
-        "socket_timeout": 25,
-        "retries": 2,
-        "js_runtimes": {"node": {}},
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-    }
-    cookies, _ = _cookies_file(user_id)
-    if cookies:
-        opts["cookiefile"] = cookies
-    return opts
+# Ordered list of YouTube player-client sets to try, from most to least preferred.
+# Some videos only expose playable formats through a subset of YouTube's player
+# clients, so pinning to a single set (e.g. only "android, web") can make yt-dlp
+# report "Requested format is not available" even though the video is fine.
+# `None` means "let yt-dlp use its built-in default client set".
+_YD_PLAYER_CLIENT_SETS: list[list[str] | None] = [
+    ["android", "web"],              # 0 - preferred default (fast audio-only)
+    ["web", "tv"],                   # 1 - tv client often exposes formats others miss
+    ["tv"],                          # 2 - tv also bypasses bot-checks more often
+    ["android_vr", "web_embedded"],  # 3 - embedded client set
+    ["ios", "mweb"],                 # 4 - mobile clients
+    None,                            # 5 - yt-dlp built-in default set
+]
+
+# (player_client_set, format_spec) pairs tried in order when downloading audio.
+# `format_spec=None` means let yt-dlp pick its default format.
+_YD_DOWNLOAD_STRATEGIES: list[tuple[list[str] | None, str | None]] = [
+    (["android", "web"], "bestaudio/best"),
+    (["android", "web"], None),
+    (["web", "tv"], "bestaudio/best"),
+    (["web", "tv"], None),
+    (["tv"], "bestaudio/best"),
+    (["tv"], None),
+    (["android_vr", "web_embedded"], "bestaudio/best"),
+    (["ios", "mweb"], "bestaudio/best"),
+    (None, "bestaudio/best"),
+    (None, None),
+]
 
 
-def _handle_inspect_error(exc: DownloadError) -> ServiceError:
-    message = str(exc).replace("ERROR: ", "").strip()
+def _is_bot_error(message: str) -> bool:
     lowered = message.lower()
-    if any(
+    return any(
         phrase in lowered
         for phrase in (
             "sign in to confirm",
@@ -155,12 +166,54 @@ def _handle_inspect_error(exc: DownloadError) -> ServiceError:
             "use --cookies",
             "from-browser",
         )
-    ):
+    )
+
+
+def _is_format_unavailable(message: str) -> bool:
+    lowered = message.lower()
+    return "requested format is not available" in lowered or "no formats" in lowered
+
+
+def _base_ydl_options(
+    user_id: str | None = None,
+    player_client: list[str] | None = _YD_PLAYER_CLIENT_SETS[0],
+) -> dict[str, Any]:
+    opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "extract_flat": False,
+        "socket_timeout": 25,
+        "retries": 2,
+        "js_runtimes": {"node": {}},
+    }
+    # Only pin player clients explicitly; `player_client=None` keeps yt-dlp's
+    # built-in default set (which itself covers many clients).
+    if player_client:
+        opts["extractor_args"] = {"youtube": {"player_client": player_client}}
+    cookies, _ = _cookies_file(user_id)
+    if cookies:
+        opts["cookiefile"] = cookies
+    return opts
+
+
+def _handle_inspect_error(exc: DownloadError) -> ServiceError:
+    message = str(exc).replace("ERROR: ", "").strip()
+    lowered = message.lower()
+    if _is_bot_error(message):
         return ServiceError(
             "YouTube blocked this request from the server (bot check). "
             "YouTube often blocks cloud servers like Render. No code fix can permanently avoid it. "
             "Quick fix: click 'Fix with cookies' below, install the free 'Get cookies.txt LOCALLY' extension, export cookies.txt, upload it, and try again. "
             "See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
+        )
+    if _is_format_unavailable(message):
+        return ServiceError(
+            "YouTube could not open this video. No playable format was found for it. "
+            "This usually means the video is private, region- or age-restricted, DRM-protected, "
+            "members-only, removed, or otherwise blocked to this server. Confirm the video is "
+            "public and playable, then try again or use a different video."
         )
     return ServiceError(f"YouTube could not open this video. {message[-400:]}")
 
@@ -181,56 +234,71 @@ def inspect_video(url: str, user_id: str | None = None) -> dict[str, Any]:
         if not own_valid and not has_shared and has_global:
             # allow global fallback silently
             pass
-    options = _base_ydl_options(user_id=user_id)
-    info: dict[str, Any] | None = None
     # Track which cookie we tried for expiry marking
     cookies_tried, source = _cookies_file(user_id)
-    try:
-        with yt_dlp.YoutubeDL(options) as downloader:
-            info = downloader.extract_info(url, download=False)
-        # success: mark cookie used
-        if cookies_tried and source in {"own", "shared"} and user_id:
-            try:
-                from .user_cookies import mark_used
-                # if shared, mark donor as used
-                if source == "shared":
-                    from .user_cookies import find_shared_cookie
-                    shared = find_shared_cookie(exclude_user_id=user_id)
-                    if shared:
-                        mark_used(shared[0])
-                else:
-                    mark_used(user_id)
-            except Exception:
-                pass
-    except DownloadError as exc:
-        msg = str(exc).lower()
-        # If we got a bot error and we used a user cookie, mark it expired so UI prompts renew
-        if ("sign in" in msg or "bot" in msg) and cookies_tried and source == "own" and user_id:
-            try:
-                from .user_cookies import mark_expired
-                mark_expired(user_id)
-            except Exception:
-                pass
-        if "sign in" in msg or "bot" in msg:
-            try:
-                alt_opts = dict(options)
-                alt_opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
-                with yt_dlp.YoutubeDL(alt_opts) as downloader:
-                    info = downloader.extract_info(url, download=False)
-            except DownloadError as exc2:
-                raise _handle_inspect_error(exc2) from exc2
-            except Exception as exc2:
-                raise _handle_inspect_error(exc) from exc2
-            # if retry succeeded, fall through to processing
-        else:
-            raise _handle_inspect_error(exc) from exc
-    except Exception as exc:
-        raise ServiceError("YouTube metadata could not be loaded. Check the link and try again.") from exc
+    info: dict[str, Any] | None = None
+    last_error: DownloadError | None = None
+    # Rotate through player-client sets. Different clients can expose different
+    # format lists, and some (notably "tv") sidestep YouTube's bot-check more
+    # often, so a video that one client rejects may work with the next.
+    for player_client in _YD_PLAYER_CLIENT_SETS:
+        options = _base_ydl_options(user_id=user_id, player_client=player_client)
+        try:
+            with yt_dlp.YoutubeDL(options) as downloader:
+                candidate = downloader.extract_info(url, download=False)
+        except DownloadError as exc:
+            msg = str(exc).lower()
+            # If we got a bot error and we used a user cookie, mark it expired so the UI prompts a renew.
+            if _is_bot_error(str(exc)) and cookies_tried and source == "own" and user_id:
+                try:
+                    from .user_cookies import mark_expired
+                    mark_expired(user_id)
+                except Exception:
+                    pass
+            last_error = exc
+            # Bot/verification errors won't be fixed by a different client, so fail fast.
+            if _is_bot_error(str(exc)):
+                raise _handle_inspect_error(exc) from exc
+            continue  # otherwise try the next client set
+        except Exception as exc:
+            raise ServiceError("YouTube metadata could not be loaded. Check the link and try again.") from exc
 
-    if info and info.get("entries"):
-        info = next((entry for entry in info["entries"] if entry), None)
+        if candidate and candidate.get("entries"):
+            candidate = next((entry for entry in candidate["entries"] if entry), None)
+        if not candidate:
+            last_error = DownloadError("ERROR: No video was found at that link.")
+            continue
+        # This client answered, but returned no playable formats -> another client
+        # may be able to play it, so keep rotating.
+        formats = candidate.get("formats")
+        if formats is not None and not formats:
+            last_error = DownloadError(
+                f"ERROR: [youtube] {candidate.get('id')}: Requested format is not available. "
+                "Use --list-formats for a list of available formats"
+            )
+            continue
+        info = candidate
+        break
+
     if not info:
+        if last_error is not None:
+            raise _handle_inspect_error(last_error) from last_error
         raise ServiceError("No video was found at that link.")
+
+    # success: mark cookie used
+    if cookies_tried and source in {"own", "shared"} and user_id:
+        try:
+            from .user_cookies import mark_used
+            # if shared, mark donor as used
+            if source == "shared":
+                from .user_cookies import find_shared_cookie
+                shared = find_shared_cookie(exclude_user_id=user_id)
+                if shared:
+                    mark_used(shared[0])
+            else:
+                mark_used(user_id)
+        except Exception:
+            pass
     if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
         raise ServiceError("Live and upcoming streams cannot be transcribed until they end.")
 
@@ -326,13 +394,6 @@ class JobManager:
 
     async def _download_audio(self, job: Job) -> None:
         output = str(job.directory / "source.%(ext)s")
-        base_command = [
-            sys.executable, "-m", "yt_dlp",
-            "--no-playlist", "--no-warnings", "--newline",
-            "--js-runtimes", "node",
-            "--retries", "3", "--fragment-retries", "3",
-            "--extractor-args", "youtube:player_client=android,web",
-        ]
         is_full = job.start_seconds <= 0.05 and abs(job.end_seconds - float(job.video["duration"])) <= 0.75
         section_args: list[str] = []
         if not is_full:
@@ -346,17 +407,34 @@ class JobManager:
             command_suffix.extend(["--cookies", cookies])
         command_suffix.append(job.url)
 
-        # Try efficient audio-only first; if format unavailable, fall back to default
-        attempts = [
-            [*base_command, "-f", "bestaudio/best", "-o", output, *section_args, *command_suffix],
-            [*base_command, "-o", output, *section_args, *command_suffix],
-        ]
+        def _build_command(player_client: list[str] | None, format_spec: str | None) -> list[str]:
+            cmd = [
+                sys.executable, "-m", "yt_dlp",
+                "--no-playlist", "--no-warnings", "--newline",
+                "--js-runtimes", "node",
+                "--retries", "3", "--fragment-retries", "3",
+            ]
+            if player_client:
+                cmd.extend(["--extractor-args", f"youtube:player_client={','.join(player_client)}"])
+            if format_spec:
+                cmd.extend(["-f", format_spec])
+            cmd.extend(["-o", output, *section_args, *command_suffix])
+            return cmd
+
+        # Try efficient audio-only first, then fall back through other player
+        # clients and format specs. Different clients expose different format
+        # lists, so rotating through them recovers most "Requested format is not
+        # available" cases instead of giving up after the default format.
         last_error_detail = ""
-        for attempt_index, command in enumerate(attempts):
-            if attempt_index > 0:
-                # Clean previous partial download on retry
-                for partial in job.directory.glob("source.*.part"):
-                    partial.unlink(missing_ok=True)
+        attempted = 0
+        for player_client, format_spec in _YD_DOWNLOAD_STRATEGIES:
+            attempted += 1
+            if attempted > 1:
+                # Clean previous partial/complete download before retrying so the
+                # candidate-file selection below never picks up a stale attempt.
+                for stale in job.directory.glob("source.*"):
+                    stale.unlink(missing_ok=True)
+            command = _build_command(player_client, format_spec)
             job.process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
@@ -384,25 +462,25 @@ class JobManager:
                 break
             detail = " ".join(recent_output)[-500:]
             lowered_detail = detail.lower()
-            if "requested format is not available" in lowered_detail:
-                last_error_detail = detail
-                continue  # retry with default format
-            if "sign in" in lowered_detail or "bot" in lowered_detail or "cookies" in lowered_detail:
+            if _is_bot_error(detail):
                 raise ServiceError(
                     "YouTube requested verification from this server (bot check). "
                     "Upload a fresh cookies.txt via 'Fix with cookies' or set YTDLP_COOKIES_FILE. "
                     "See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
                 )
             last_error_detail = detail
+            # For format errors, keep trying the remaining strategies.
+            # For other errors, keep the detail but still try other clients too,
+            # since a different client may succeed where this one failed.
         else:
-            # All attempts exhausted
+            # All strategies exhausted
             if last_error_detail:
-                lowered_detail = last_error_detail.lower()
-                if "requested format is not available" in lowered_detail:
+                if _is_format_unavailable(last_error_detail):
                     raise ServiceError(
-                        "YouTube could not open this video. The requested format was not available. "
-                        "This usually means the video has restricted or unusual format settings. "
-                        "Try selecting the full video instead of a partial clip, or try a different video."
+                        "YouTube could not open this video. No playable audio format was available. "
+                        "This usually means the video is private, region/age-restricted, DRM-protected, "
+                        "members-only, removed, or otherwise blocked to this server. Confirm the video "
+                        "is public and playable, then try again or use a different video."
                     )
                 raise ServiceError(f"The video audio could not be downloaded. {last_error_detail}")
             raise ServiceError("The video audio could not be downloaded.")

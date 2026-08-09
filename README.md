@@ -149,6 +149,32 @@ Cookies can expire and must be maintained by the person operating the deployment
 
 Only download or transcribe videos you are authorized to process, and follow YouTube's terms and applicable laws.
 
+## Handling "Requested format is not available"
+
+Some YouTube videos only expose their playable audio through certain player
+clients. If a single client is pinned (for example only `android`/`web`),
+yt-dlp can fail with:
+
+```text
+[youtube] <id>: Requested format is not available. Use --list-formats for a list of available formats
+```
+
+The app now automatically retries with a chain of fallback strategies instead of
+giving up:
+
+- Multiple YouTube player clients are tried in order (`android, web`, `web, tv`,
+  `tv`, `android_vr, web_embedded`, `ios, mweb`, and finally yt-dlp's built-in
+  default set). The `tv` client in particular exposes formats other clients omit
+  and is also less likely to trigger YouTube's bot-check.
+- For each client, the app tries efficient audio-only selection
+  (`bestaudio/best`) and then the default format.
+- Video inspection (`/api/videos/inspect`) performs the same client rotation and
+  treats an empty format list as a signal to try the next client, instead of
+  failing immediately.
+
+If all strategies fail, the app reports a clearer message that the video is
+likely private, region/age-restricted, DRM-protected, members-only, or removed.
+
 ## Local development
 
 ### Requirements

@@ -326,58 +326,86 @@ class JobManager:
 
     async def _download_audio(self, job: Job) -> None:
         output = str(job.directory / "source.%(ext)s")
-        command = [
+        base_command = [
             sys.executable, "-m", "yt_dlp",
             "--no-playlist", "--no-warnings", "--newline",
             "--js-runtimes", "node",
             "--retries", "3", "--fragment-retries", "3",
             "--extractor-args", "youtube:player_client=android,web",
-            "-f", "bestaudio/best",
-            "-o", output,
         ]
         is_full = job.start_seconds <= 0.05 and abs(job.end_seconds - float(job.video["duration"])) <= 0.75
+        section_args: list[str] = []
         if not is_full:
             section = f"*{clock(job.start_seconds, milliseconds=True)}-{clock(job.end_seconds, milliseconds=True)}"
-            command.extend(["--download-sections", section])
+            section_args = ["--download-sections", section]
         cookies, source = _cookies_file(job.owner_user_id)
         if cookies:
-            command.extend(["--cookies", cookies])
             job.cookie_source = source
-        command.append(job.url)
+        command_suffix = []
+        if cookies:
+            command_suffix.extend(["--cookies", cookies])
+        command_suffix.append(job.url)
 
-        job.process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        assert job.process.stdout
-        recent_output: list[str] = []
-        while True:
-            line_bytes = await job.process.stdout.readline()
-            if not line_bytes:
+        # Try efficient audio-only first; if format unavailable, fall back to default
+        attempts = [
+            [*base_command, "-f", "bestaudio/best", "-o", output, *section_args, *command_suffix],
+            [*base_command, "-o", output, *section_args, *command_suffix],
+        ]
+        last_error_detail = ""
+        for attempt_index, command in enumerate(attempts):
+            if attempt_index > 0:
+                # Clean previous partial download on retry
+                for partial in job.directory.glob("source.*.part"):
+                    partial.unlink(missing_ok=True)
+            job.process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            assert job.process.stdout
+            recent_output: list[str] = []
+            while True:
+                line_bytes = await job.process.stdout.readline()
+                if not line_bytes:
+                    break
+                line = line_bytes.decode("utf-8", errors="replace").strip()
+                recent_output.append(line)
+                recent_output = recent_output[-12:]
+                if "%" in line:
+                    try:
+                        percent_text = line.split("%", 1)[0].split()[-1]
+                        percent = float(percent_text)
+                        job.touch(progress=5 + min(percent, 100) * 0.18)
+                    except (ValueError, IndexError):
+                        pass
+                self._check_cancelled(job)
+            return_code = await job.process.wait()
+            if return_code == 0:
                 break
-            line = line_bytes.decode("utf-8", errors="replace").strip()
-            recent_output.append(line)
-            recent_output = recent_output[-12:]
-            if "%" in line:
-                try:
-                    percent_text = line.split("%", 1)[0].split()[-1]
-                    percent = float(percent_text)
-                    job.touch(progress=5 + min(percent, 100) * 0.18)
-                except (ValueError, IndexError):
-                    pass
-            self._check_cancelled(job)
-        return_code = await job.process.wait()
-        if return_code != 0:
             detail = " ".join(recent_output)[-500:]
             lowered_detail = detail.lower()
+            if "requested format is not available" in lowered_detail:
+                last_error_detail = detail
+                continue  # retry with default format
             if "sign in" in lowered_detail or "bot" in lowered_detail or "cookies" in lowered_detail:
                 raise ServiceError(
                     "YouTube requested verification from this server (bot check). "
                     "Upload a fresh cookies.txt via 'Fix with cookies' or set YTDLP_COOKIES_FILE. "
                     "See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
                 )
-            raise ServiceError(f"The video audio could not be downloaded. {detail}")
+            last_error_detail = detail
+        else:
+            # All attempts exhausted
+            if last_error_detail:
+                lowered_detail = last_error_detail.lower()
+                if "requested format is not available" in lowered_detail:
+                    raise ServiceError(
+                        "YouTube could not open this video. The requested format was not available. "
+                        "This usually means the video has restricted or unusual format settings. "
+                        "Try selecting the full video instead of a partial clip, or try a different video."
+                    )
+                raise ServiceError(f"The video audio could not be downloaded. {last_error_detail}")
+            raise ServiceError("The video audio could not be downloaded.")
 
         candidates = [
             path for path in job.directory.glob("source.*")

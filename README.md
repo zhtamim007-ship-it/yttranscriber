@@ -12,7 +12,9 @@ A production-ready YouTube transcription web app with precise timeline selection
 - Lets the user transcribe the entire video or choose an exact start and end timestamp.
 - Downloads only the selected timeline when possible instead of always fetching the complete video.
 - Uses FFmpeg to create a seekable audio overview and a separate speech-optimized, noise-reduced audio stream.
+- Plays a real YouTube preview of the video right from the setup card (click the thumbnail play button).
 - Splits long selections into overlapping 10-minute chunks so requests stay within provider limits without losing words at chunk boundaries.
+- Survives transient speech-provider outages: automatic retries with backoff, a fallback audio re-encode (WAV) when the provider rejects the MP3, optional fallback models, and a one-click **Retry transcription** button when the provider is temporarily down.
 - Uses Whisper Large v3 with automatic language detection.
 - Preserves Bangla, English, other languages, and code-switched speech without translating them.
 - Shows timestamped transcript segments that seek the selected audio when clicked.
@@ -190,6 +192,47 @@ This project prevents that failure in three ways:
 If all strategies fail, the app reports a clearer message that the video is
 likely private, region/age-restricted, DRM-protected, members-only, or removed.
 
+## Handling "This speech model could not process this audio. Internal server error."
+
+This message is raised when the speech provider's `/audio/transcriptions`
+endpoint answers with `HTTP 500 Internal server error`. Per
+[Groq's error documentation](https://console.groq.com/docs/errors), a 500 means
+"A generic error occurred on the server. Try the request again later" — i.e.
+**a transient provider-side failure**, not a problem with the submitted video.
+Groq's transcription endpoint has experienced extended 500 incidents
+(see the [Groq community forum](https://community.groq.com)), and the same
+error can also be caused by a provider that fails to decode a particular MP3
+encoding.
+
+The app now escalates through several layers before giving up:
+
+1. **Retries with backoff.** Each chunk is retried up to
+   `TRANSCRIPTION_MAX_ATTEMPTS` times (default 5) with exponential backoff,
+   jitter, and respect for the provider's `Retry-After` header
+   (`TRANSCRIPTION_RETRY_AFTER_CAP_SECONDS`, default 45s). Network timeouts
+   and unreadable 2xx bodies are retried the same way.
+2. **Fallback audio re-encode.** If the prepared MP3 keeps failing, the chunk
+   is re-encoded to a maximally-compatible WAV (PCM 16 kHz mono — explicitly
+   supported by Groq/OpenAI) or, for chunks too large for the 25 MB upload
+   cap, a clean CBR MP3 with no XING/ID3 metadata, and retried. This recovers
+   the class of 500s caused by server-side decode failures of a specific
+   encoding.
+3. **Fallback models.** If the configured `TRANSCRIPTION_MODEL` keeps failing
+   with transient server errors, the models listed in
+   `TRANSCRIPTION_MODEL_FALLBACKS` (default `whisper-large-v3-turbo`) are
+   tried. Model fallback is only used for transient 5xx/429/network failures —
+   never for auth failures.
+4. **Actionable UX.** If every layer fails, the job is marked `retryable` and
+   the setup card shows a **Retry transcription** button. Retrying reuses the
+   already-downloaded audio (no re-download) and goes straight back to
+   transcription. Permanent errors (bad API key, file rejected with 400/413/
+   415/422, model not found) fail fast with a precise message and no retry
+   button.
+
+If you still see the error, the provider is almost certainly in an outage
+window: wait a few minutes and press **Retry transcription** — nothing needs
+to change in your video, cookies, or configuration.
+
 ## Local development
 
 ### Requirements
@@ -277,6 +320,9 @@ http://localhost:10000
 | `TRANSCRIPTION_API_KEY` | `GROQ_API_KEY` | Optional dedicated speech-recognition API key |
 | `TRANSCRIPTION_BASE_URL` | `https://api.groq.com/openai/v1` | OpenAI-compatible transcription API root |
 | `TRANSCRIPTION_MODEL` | `whisper-large-v3` | Speech-to-text model |
+| `TRANSCRIPTION_MAX_ATTEMPTS` | `5` | Upload retries per (model, encoding) pair before falling back |
+| `TRANSCRIPTION_RETRY_AFTER_CAP_SECONDS` | `45` | Maximum backoff sleep per retry |
+| `TRANSCRIPTION_MODEL_FALLBACKS` | `whisper-large-v3-turbo` | Comma-separated models tried only on transient provider errors (empty disables) |
 | `REFINEMENT_API_KEY` | `GROQ_API_KEY` | Optional dedicated AI-refinement API key |
 | `REFINEMENT_BASE_URL` | Transcription URL | OpenAI-compatible chat API root |
 | `REFINEMENT_MODEL` | `llama-3.3-70b-versatile` | Transcript-refinement model |
@@ -297,6 +343,7 @@ If you use an API provider other than Groq, configure the base URLs, API keys, a
 - `DELETE /api/jobs/{id}` — Cancel and remove a job
 - `GET /api/jobs/{id}/audio` — Stream the selected audio overview
 - `POST /api/jobs/{id}/refine` — Start non-destructive AI refinement
+- `POST /api/jobs/{id}/retry` — Re-queue a failed/cancelled job (skips re-download when audio exists)
 - `GET /api/jobs/{id}/download?format=txt` — Export plain text
 - `GET /api/jobs/{id}/download?format=srt` — Export SRT captions
 - `GET /api/jobs/{id}/download?format=vtt` — Export WebVTT captions

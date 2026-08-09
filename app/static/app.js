@@ -43,9 +43,10 @@ const els = {
   myCookieForm: $("#myCookieForm"), myCookieFile: $("#myCookieFile"), myCookieBrowse: $("#myCookieBrowse"), myCookieFileName: $("#myCookieFileName"), myCookieUpload: $("#myCookieUpload"), myCookieStatus: $("#myCookieStatus"),
   shareToggle: $("#shareToggle"), poolInfo: $("#poolInfo"), useCommunityBtn: $("#useCommunityBtn"), communityStatus: $("#communityStatus"),
   engineStatus: $("#engineStatus"), setup: $("#videoSetup"), thumbnail: $("#videoThumbnail"), durationBadge: $("#videoDurationBadge"),
+  thumbnailWrap: $("#thumbnailWrap"), videoPlayButton: $("#videoPlayButton"), videoPlayerHost: $("#videoPlayerHost"), videoPlayerClose: $("#videoPlayerClose"),
   setupTitle: $("#setupTitle"), channel: $("#videoChannel"), durationText: $("#videoDurationText"), selectedDuration: $("#selectedDuration"),
   controls: $("#timelineControls"), rangeVisual: $("#rangeVisual"), startRange: $("#startRange"), endRange: $("#endRange"),
-  startTime: $("#startTime"), endTime: $("#endTime"), timelineError: $("#timelineError"), startButton: $("#startButton"),
+  startTime: $("#startTime"), endTime: $("#endTime"), timelineError: $("#timelineError"), startButton: $("#startButton"), retryButton: $("#retryButton"),
   processingTitle: $("#processingTitle"), processingStage: $("#processingStage"), progressBar: $("#progressBar"), progressPercent: $("#progressPercent"),
   processingVideo: $("#processingVideo"), cancelButton: $("#cancelButton"),
   newButton: $("#newTranscriptButton"), resultTitle: $("#resultTitle"), resultMeta: $("#resultMeta"), resultThumbnail: $("#resultThumbnail"),
@@ -269,6 +270,7 @@ els.inspectForm.addEventListener("submit", async event => {
     state.start = 0;
     state.end = Number(video.duration);
     populateVideo(video);
+    els.retryButton.hidden = true;
     els.setup.hidden = false;
     if (els.userGate) els.userGate.hidden = true;
     if (els.cookieHelp) els.cookieHelp.hidden = true;
@@ -421,8 +423,40 @@ function populateVideo(video) {
   const full = $("input[name='rangeMode'][value='full']");
   full.checked = true;
   els.controls.classList.add("is-disabled");
+  closeVideoPreview();
   updateTimeline();
 }
+
+// --- Video preview on the setup card ---------------------------------------
+// The thumbnail play button used to be purely decorative; now it embeds the
+// real YouTube player so the video actually plays before transcription.
+function playVideoPreview() {
+  if (!state.video?.id) return;
+  const iframe = document.createElement("iframe");
+  iframe.src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(state.video.id)}?autoplay=1&rel=0&modestbranding=1&playsinline=1`;
+  iframe.title = `Play ${state.video.title}`;
+  iframe.setAttribute("allow", "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share");
+  iframe.setAttribute("allowfullscreen", "");
+  iframe.setAttribute("loading", "lazy");
+  els.videoPlayerHost.replaceChildren(iframe);
+  els.videoPlayerHost.hidden = false;
+  els.thumbnail.hidden = true;
+  els.videoPlayButton.hidden = true;
+  els.videoPlayerClose.hidden = false;
+  if (els.thumbnailWrap) els.thumbnailWrap.classList.add("is-playing");
+}
+
+function closeVideoPreview() {
+  els.videoPlayerHost.hidden = true;
+  els.videoPlayerHost.replaceChildren();
+  els.thumbnail.hidden = false;
+  els.videoPlayButton.hidden = false;
+  els.videoPlayerClose.hidden = true;
+  if (els.thumbnailWrap) els.thumbnailWrap.classList.remove("is-playing");
+}
+
+if (els.videoPlayButton) els.videoPlayButton.addEventListener("click", playVideoPreview);
+if (els.videoPlayerClose) els.videoPlayerClose.addEventListener("click", closeVideoPreview);
 
 $$('input[name="rangeMode"]').forEach(input => input.addEventListener("change", event => {
   const custom = event.target.value === "custom";
@@ -489,6 +523,7 @@ els.startButton.addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({ url: state.url, start_seconds: state.start, end_seconds: state.end }),
     });
+    els.retryButton.hidden = true;
     state.job = job;
     beginProcessing(job);
   } catch (error) {
@@ -500,8 +535,25 @@ els.startButton.addEventListener("click", async () => {
   }
 });
 
+els.retryButton.addEventListener("click", async () => {
+  if (!state.job || !state.job.retryable) return;
+  els.retryButton.classList.add("is-loading");
+  els.retryButton.disabled = true;
+  try {
+    const job = await api(`/api/jobs/${state.job.id}/retry`, { method: "POST" });
+    state.job = job;
+    beginProcessing(job);
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    els.retryButton.classList.remove("is-loading");
+    els.retryButton.disabled = false;
+  }
+});
+
 function beginProcessing(job) {
   setView("processing");
+  els.retryButton.hidden = true;
   els.processingTitle.textContent = "Preparing your transcript";
   els.processingStage.textContent = job.stage;
   els.cancelButton.textContent = "Cancel transcription";
@@ -535,6 +587,8 @@ async function pollJob(token) {
         return;
       }
       if (["failed", "cancelled"].includes(job.status)) {
+        const retryable = job.status === "failed" && Boolean(job.retryable);
+        els.retryButton.hidden = !retryable;
         showToast(job.error || "Transcription was cancelled.", job.status === "failed");
         setView("landing");
         if (job.status === "failed") {
@@ -565,6 +619,7 @@ els.cancelButton.addEventListener("click", async () => {
     els.cancelButton.disabled = false;
   }
   state.job = null;
+  els.retryButton.hidden = true;
   setView("landing");
   showToast("Transcription cancelled.");
 });
@@ -579,6 +634,7 @@ function renderResult(job) {
   els.audioRange.textContent = `${formatTime(job.selection.start)} — ${formatTime(job.selection.end)}`;
   els.audioDuration.textContent = formatTime(job.selection.duration);
   els.audio.src = job.audio_url;
+  if (job.audio_url) els.audio.load();
   els.wordCount.textContent = Number(job.word_count || 0).toLocaleString();
   els.segmentCount.textContent = Number(job.segments?.length || 0).toLocaleString();
   els.languageList.textContent = languageNames;
@@ -639,6 +695,10 @@ function appendHighlighted(target, text, query) {
   }
   target.append(document.createTextNode(text.slice(cursor)));
 }
+
+els.audio.addEventListener("error", () => {
+  if (state.job) showToast("The audio preview could not be loaded — the transcript is still complete.", true);
+});
 
 els.audio.addEventListener("timeupdate", () => {
   if (!state.job || state.activeVersion !== "original") return;
@@ -781,6 +841,7 @@ els.newButton.addEventListener("click", async () => {
   els.audio.pause();
   els.audio.removeAttribute("src");
   els.audio.load();
+  els.retryButton.hidden = true;
   setView("landing");
   if (previous) api(`/api/jobs/${previous.id}`, { method: "DELETE" }).catch(() => {});
 });

@@ -37,7 +37,7 @@ YouTube captions are not required or used.
 
 The repository includes a `render.yaml` file and a Dockerfile.
 
-Docker is used so that FFmpeg, FFprobe, Node.js, Python, and the required application dependencies are installed automatically.
+Docker is used so that FFmpeg, FFprobe, a JavaScript runtime (Deno), Python, and the required application dependencies are installed automatically.
 
 The Render Blueprint explicitly contains:
 
@@ -159,18 +159,33 @@ yt-dlp can fail with:
 [youtube] <id>: Requested format is not available. Use --list-formats for a list of available formats
 ```
 
-The app now automatically retries with a chain of fallback strategies instead of
-giving up:
+The most common cause on a fresh deployment is a **missing JavaScript
+runtime**, not private or restricted videos. Since late 2025, yt-dlp solves
+YouTube's signature/`n` challenges in an external JS runtime and has no
+pure-Python fallback. Without a supported runtime (Deno >= 2.3 or
+Node.js >= 22 — Debian's `nodejs` package is too old), formats from the
+`web`/`web_safari`/`tv`/`mweb`/`web_embedded` clients are dropped during
+extraction and `android`/`ios` formats additionally require a GVS PO token, so
+yt-dlp ends up with zero playable formats for ordinary public videos.
 
-- Multiple YouTube player clients are tried in order (`android, web`, `web, tv`,
-  `tv`, `android_vr, web_embedded`, `ios, mweb`, and finally yt-dlp's built-in
-  default set). The `tv` client in particular exposes formats other clients omit
-  and is also less likely to trigger YouTube's bot-check.
-- For each client, the app tries efficient audio-only selection
-  (`bestaudio/best`) and then the default format.
-- Video inspection (`/api/videos/inspect`) performs the same client rotation and
-  treats an empty format list as a signal to try the next client, instead of
-  failing immediately.
+This project prevents that failure in three ways:
+
+- **A supported runtime ships with the image.** `requirements.txt` installs
+  `yt-dlp[default,deno]`, whose `deno` pip extra provides the Deno runtime
+  yt-dlp prefers, and the app enables both `deno` and `node` JS runtimes.
+  The Dockerfile deliberately does not install Debian's `nodejs`.
+- **Fallback strategies degrade gracefully.** yt-dlp's environment-adaptive
+  default client set is tried first (it automatically uses only clients that
+  work with the available runtime and cookies), followed by client sets
+  ordered from runtime-independent (`android_vr`) to runtime/PO-token
+  dependent (`web`, `tv`, `android`, `ios`, `mweb`). For each client, the app
+  tries efficient audio-only selection (`bestaudio/best`) and then the default
+  format.
+- **Rotation instead of immediate failure.** Video inspection
+  (`/api/videos/inspect`) performs the same client rotation and treats an
+  empty format list as a signal to try the next client. Download attempts
+  rotate likewise, and error output is classified so a missing runtime
+  produces an actionable message instead of a misleading restriction hint.
 
 If all strategies fail, the app reports a clearer message that the video is
 likely private, region/age-restricted, DRM-protected, members-only, or removed.
@@ -182,7 +197,9 @@ likely private, region/age-restricted, DRM-protected, members-only, or removed.
 - Python 3.12 or later
 - FFmpeg
 - FFprobe
-- Node.js
+- Deno >= 2.3 or Node.js >= 22 (used by yt-dlp to solve YouTube's signature
+  challenges; `pip install -r requirements.txt` already provides Deno through
+  the `yt-dlp[default,deno]` extra)
 - Groq API key
 
 ### Install

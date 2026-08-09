@@ -124,33 +124,46 @@ def _cookies_file(user_id: str | None = None) -> tuple[str | None, str | None]:
     return resolved, "shared"
 
 
-# Ordered list of YouTube player-client sets to try, from most to least preferred.
-# Some videos only expose playable formats through a subset of YouTube's player
-# clients, so pinning to a single set (e.g. only "android, web") can make yt-dlp
-# report "Requested format is not available" even though the video is fine.
+# Ordered list of YouTube player-client sets to try when inspecting or
+# downloading, from most to least preferred.
+#
+# Ordering rationale (yt-dlp >= 2025.11 "EJS" architecture):
+# - Solving YouTube's signature/n challenges requires a *supported* JavaScript
+#   runtime (deno >= 2.3, node >= 22); there is no pure-Python fallback any
+#   more. Without one, web/web_safari/tv/mweb/web_embedded formats are dropped
+#   entirely, and android/ios formats additionally require a GVS PO token.
+# - yt-dlp's built-in default client set adapts to the environment
+#   (android_vr alone when no JS runtime is usable, android_vr + web_safari
+#   when one is, auth-aware sets when cookies are present), so it goes FIRST.
+# - The remaining sets run from least to most dependent on a JS runtime and
+#   PO tokens, so a missing runtime degrades gracefully to clients that can
+#   still yield playable formats instead of every rotation returning an empty
+#   format list (which used to surface as "Requested format is not available").
 # `None` means "let yt-dlp use its built-in default client set".
 _YD_PLAYER_CLIENT_SETS: list[list[str] | None] = [
-    ["android", "web"],              # 0 - preferred default (fast audio-only)
-    ["web", "tv"],                   # 1 - tv client often exposes formats others miss
-    ["tv"],                          # 2 - tv also bypasses bot-checks more often
-    ["android_vr", "web_embedded"],  # 3 - embedded client set
-    ["ios", "mweb"],                 # 4 - mobile clients
-    None,                            # 5 - yt-dlp built-in default set
+    None,                             # 0 - yt-dlp default set (runtime- and auth-aware)
+    ["android_vr", "web_embedded"],   # 1 - android_vr needs no JS runtime or PO token
+    ["web", "tv"],                    # 2 - need a JS runtime; tv needs no PO token
+    ["android", "web"],               # 3 - GVS PO-token dependent for audio
+    ["ios", "mweb"],                  # 4 - PO-token / JS-runtime dependent
+    ["tv"],                           # 5 - last resort
 ]
 
 # (player_client_set, format_spec) pairs tried in order when downloading audio.
-# `format_spec=None` means let yt-dlp pick its default format.
+# `format_spec=None` means let yt-dlp pick its default format. Same ordering
+# rationale as _YD_PLAYER_CLIENT_SETS: adapt to the environment first, then
+# fall back from runtime-independent to runtime/PO-token-dependent clients.
 _YD_DOWNLOAD_STRATEGIES: list[tuple[list[str] | None, str | None]] = [
-    (["android", "web"], "bestaudio/best"),
-    (["android", "web"], None),
-    (["web", "tv"], "bestaudio/best"),
-    (["web", "tv"], None),
-    (["tv"], "bestaudio/best"),
-    (["tv"], None),
-    (["android_vr", "web_embedded"], "bestaudio/best"),
-    (["ios", "mweb"], "bestaudio/best"),
     (None, "bestaudio/best"),
     (None, None),
+    (["android_vr", "web_embedded"], "bestaudio/best"),
+    (["android_vr", "web_embedded"], None),
+    (["web", "tv"], "bestaudio/best"),
+    (["web", "tv"], None),
+    (["android", "web"], "bestaudio/best"),
+    (["android", "web"], None),
+    (["ios", "mweb"], "bestaudio/best"),
+    (["tv"], "bestaudio/best"),
 ]
 
 
@@ -174,6 +187,30 @@ def _is_format_unavailable(message: str) -> bool:
     return "requested format is not available" in lowered or "no formats" in lowered
 
 
+def _is_js_runtime_missing(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "javascript runtime could not be found",
+            "no supported javascript runtime",
+            "signature solving failed",
+            "n challenge solving failed",
+            "challenge solving failed",
+            "challenge solver",
+        )
+    )
+
+
+_JS_RUNTIME_MESSAGE = (
+    "YouTube answered with no playable formats because this server has no supported "
+    "JavaScript runtime to solve YouTube's signature challenges. The server needs "
+    "Deno (>= 2.3) or Node.js (>= 22): the Docker image installs Deno through the "
+    "yt-dlp[default,deno] pip extra. Redeploy with the updated image, or install one "
+    "of those runtimes and restart."
+)
+
+
 def _base_ydl_options(
     user_id: str | None = None,
     player_client: list[str] | None = _YD_PLAYER_CLIENT_SETS[0],
@@ -186,7 +223,13 @@ def _base_ydl_options(
         "extract_flat": False,
         "socket_timeout": 25,
         "retries": 2,
-        "js_runtimes": {"node": {}},
+        # YouTube signature/n-challenge solving needs one supported JS runtime.
+        # Enable both in yt-dlp's preference order: deno first (shipped via the
+        # yt-dlp[default,deno] extra), then node (used when Node.js >= 22 is
+        # installed, e.g. locally). Passing only {"node": {}} disabled deno and
+        # left servers with no usable solver -> every client returned zero
+        # formats -> "Requested format is not available".
+        "js_runtimes": {"deno": {}, "node": {}},
     }
     # Only pin player clients explicitly; `player_client=None` keeps yt-dlp's
     # built-in default set (which itself covers many clients).
@@ -208,6 +251,8 @@ def _handle_inspect_error(exc: DownloadError) -> ServiceError:
             "Quick fix: click 'Fix with cookies' below, install the free 'Get cookies.txt LOCALLY' extension, export cookies.txt, upload it, and try again. "
             "See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
         )
+    if _is_js_runtime_missing(message):
+        return ServiceError(_JS_RUNTIME_MESSAGE)
     if _is_format_unavailable(message):
         return ServiceError(
             "YouTube could not open this video. No playable format was found for it. "
@@ -411,6 +456,10 @@ class JobManager:
             cmd = [
                 sys.executable, "-m", "yt_dlp",
                 "--no-playlist", "--no-warnings", "--newline",
+                # The CLI enables deno by default; this flag additionally enables
+                # node (used when Node.js >= 22 is installed). Do not pass
+                # --no-js-runtimes: deno must stay enabled for YouTube signature
+                # solving (it is provided by the yt-dlp[default,deno] extra).
                 "--js-runtimes", "node",
                 "--retries", "3", "--fragment-retries", "3",
             ]
@@ -421,10 +470,13 @@ class JobManager:
             cmd.extend(["-o", output, *section_args, *command_suffix])
             return cmd
 
-        # Try efficient audio-only first, then fall back through other player
-        # clients and format specs. Different clients expose different format
-        # lists, so rotating through them recovers most "Requested format is not
-        # available" cases instead of giving up after the default format.
+        # Try yt-dlp's environment-adaptive default client set first (it picks
+        # clients that work with the available JS runtime / auth state), then
+        # fall back through client sets ordered from runtime-independent to
+        # runtime/PO-token-dependent, each with efficient audio-only selection
+        # before the default format. Different clients expose different format
+        # lists, so rotating through them recovers most "Requested format is
+        # not available" cases instead of giving up after the first failure.
         last_error_detail = ""
         attempted = 0
         for player_client, format_spec in _YD_DOWNLOAD_STRATEGIES:
@@ -475,6 +527,8 @@ class JobManager:
         else:
             # All strategies exhausted
             if last_error_detail:
+                if _is_js_runtime_missing(last_error_detail):
+                    raise ServiceError(_JS_RUNTIME_MESSAGE)
                 if _is_format_unavailable(last_error_detail):
                     raise ServiceError(
                         "YouTube could not open this video. No playable audio format was available. "
